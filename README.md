@@ -22,19 +22,19 @@ cluster architectures, local CPUs, SSH nodes, PBS, Amazon EC2, etc.
 
 functions
 ---------
-`setup_engines(client)`  Initialize all IPython engines
-`scatter(obj)`  Distribute obj to remote iPython engines, return a proxy.
+`setup_engines(client)`  Initialize all IPython engines  
+`scatter(obj)`  Distribute obj to remote iPython engines, return a proxy.  
 `gather(obj)`  Fetch back a distributed object, making it local again.
 
 classes
 -------
-`RemoteArray`   proxy object representing a remote numpy ndarray
+`RemoteArray`   proxy object representing a remote numpy ndarray  
 
-`Remote`   base class, used when creating `Remote*` proxy classes
-`@proxy_methods(base)`   class decorator for creating `Remote*` proxy classes
-`ObjectHub`  dict interface giving refs to all distributed objects cluster-wide
-`ObjectEngine`  dict holding the distributed objects of a single IPython engine
-`Ref`  reference to a (possibly remote) object
+`Remote`   base class, used when creating `Remote*` proxy classes  
+`@proxy_methods(base)`   class decorator for creating `Remote*` proxy classes  
+`ObjectHub` dict interface giving refs to all distributed objects cluster-wide  
+`ObjectEngine` dict holding the distributed objects of a single IPython engine  
+`Ref`  reference to a (possibly remote) object  
 
 attributes
 ----------
