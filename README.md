@@ -22,7 +22,6 @@ cluster architectures, local CPUs, SSH nodes, PBS, Amazon EC2, etc.
 
 functions
 ---------
-`setup_engines(client)`  Initialize all IPython engines  
 `scatter(obj)`  Distribute obj to remote iPython engines, return a proxy.  
 `gather(obj)`  Fetch back a distributed object, making it local again.
 

@@ -9,7 +9,6 @@
 This module implements the core functionality of distob.
 
 Functions:
-  setup_engines(client)  Initialize all iPython engines.
   scatter(obj)  Distribute an object to remote iPython engines, return a proxy.
   gather(obj)  Fetch back a distributed object, making it local again.
   call_all(sequence, methodname, *args, **kwargs) Call method on each element. 
@@ -290,7 +289,7 @@ def _remote_setup_engine(engine_id):
         distob.engine = ObjectEngine(engine_id)
 
 
-def setup_engines(client=None):
+def _setup_engines(client=None):
     """Prepare all iPython engines for distributed object processing.
 
     Args:
@@ -660,7 +659,7 @@ def _async_scatter(obj):
         return ars
     else:
         if distob.engine is None:
-            setup_engines()
+            _setup_engines()
         client = distob.engine._client
         dv = distob.engine._dv
         def remote_put(obj):
