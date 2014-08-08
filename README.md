@@ -22,8 +22,8 @@ cluster architectures, local CPUs, SSH nodes, PBS, Amazon EC2, etc.
 
 functions
 ---------
-`scatter(obj)`  Distribute obj to remote iPython engines, return a proxy.  
-`gather(obj)`  Fetch back a distributed object, making it local again.
+`scatter(obj)`  Distribute an object (or list of objects) to remote iPython engines, return a proxy.  
+`gather(obj)`  Fetch back a distributed object (or list), making it local again.
 
 classes
 -------
@@ -33,7 +33,7 @@ classes
 `@proxy_methods(base)`   class decorator for creating `Remote*` proxy classes  
 `ObjectHub` dict interface giving refs to all distributed objects cluster-wide  
 `ObjectEngine` dict holding the distributed objects of a single IPython engine  
-`Ref`  reference to a (possibly remote) object  
+`Ref`  reference to a (possibly remote) object
 
 attributes
 ----------
@@ -51,14 +51,14 @@ TODO
 
 * Remote ufunc support with computation routed according to operand location
 
-* Implement the DistArray class to allow a single numpy array to be spread 
+* Implement the DistArray class: allow a single numpy array to be spread 
   across multiple engines.
 
 * Make proxy classes more robust, adapting `wrapt` (pypi.python.org/pypi/wrapt)
 
 Thanks
 ------
-Incorporates `pylru.py` by Jay Hutchinson (GPLv2+) github.com/jlhutch/pylru
+Incorporates `pylru.py` by Jay Hutchinson, http://github.com/jlhutch/pylru
 
 `IPython` parallel computing, see: http://ipython.org/ipython-doc/dev/parallel/
 
