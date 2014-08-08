@@ -286,7 +286,15 @@ class ObjectHub(ObjectEngine):
 
 def _remote_setup_engine(engine_id):
     if distob.engine is None:
-        distob.engine = ObjectEngine(engine_id)
+        distob.engine = distob.ObjectEngine(engine_id)
+    # TODO these imports should be unnecessary with improved deserialization
+    import numpy as np
+    from scipy import stats
+    # TODO Using @parallel.interactive still did not import to __main__
+    #      so will do it this way for now.
+    import __main__
+    __main__.__dict__['np'] = np
+    __main__.__dict__['stats'] = stats
 
 
 def _setup_engines(client=None):
