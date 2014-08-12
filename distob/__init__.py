@@ -3,7 +3,7 @@ from .distob import (scatter, gather, call_all, Remote, proxy_methods,
                      ObjectHub, ObjectEngine, Ref)
 
 engine = None
-__version__ = '0.1.1'
+__version__ = '0.1.2'
 
 # If numpy is available, provide RemoteArray and DistArray
 try:
