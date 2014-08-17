@@ -46,7 +46,7 @@ setup(
     cmdclass = {'test': Tox},
     author_email='mattja6@gmail.com',
     description='Distributed computing made easier, using remote objects',
-    long_description=read('README.md'),
+    long_description=read('README.rst'),
     packages=['distob'],
     platforms='any',
     zip_safe=False,
