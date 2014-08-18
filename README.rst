@@ -1,7 +1,8 @@
 distob
 ======
 
-N.B. this is a development pre-release: lots not yet working, API subject to change!
+| Distributed computing made easier, using remote objects
+|  N.B. this is a development pre-release: lots not yet working, API subject to change!
 
 Overview
 --------
