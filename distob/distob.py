@@ -337,7 +337,7 @@ class Remote(object):
     the controlled class as the second base:
 
         @proxy_methods(Tree)
-        class RemoteTree(Dist, Tree)
+        class RemoteTree(Remote, Tree)
 
     Use the decorator @proxy_methods() to register the new Remote proxy class
     and to specify which methods/attributes of the existing class should be
