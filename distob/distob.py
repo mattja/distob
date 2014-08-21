@@ -27,8 +27,15 @@ import distob
 from . import _pylru
 import types
 import copy
+import warnings
 import importlib
 import collections
+
+try:
+    import numpy as np
+    _have_numpy = True
+except ImportError:
+    pass
 
 
 class Error(Exception):
@@ -352,7 +359,7 @@ class Remote(object):
     _include_underscore = ()
     _exclude = ()
 
-    def __init__(self, obj, client):
+    def __init__(self, obj):
         """Set up the Remote* proxy object to access an already-existing object,
         which may be local or remote.
 
@@ -360,9 +367,9 @@ class Remote(object):
           obj (Ref or object): either a Ref reference to the (possibly remote) 
             object to be controlled, or else an actual (local) object to be 
             controlled.
-          client (IPython.parallel.client)
         """
-        self._client = client
+        if distob.engine is None:
+            _setup_engines()
         if isinstance(obj, Ref):
             self._ref = obj
             self.is_local = (self._ref.engine_id is distob.engine.id)
@@ -374,7 +381,7 @@ class Remote(object):
             self._obcache = distob.engine[self._ref.object_id]
             self._obcache_current = True
         else:
-            self._dv = client[self._ref.engine_id]
+            self._dv = distob.engine._client[self._ref.engine_id]
             self._dv.use_dill()
             self._obcache = None
             self._obcache_current = False
@@ -447,7 +454,7 @@ class Remote(object):
                                 method_name, *args, **kwargs)
         if isinstance(r, Ref):
             RemoteClass = distob.engine.proxy_types[r.type]
-            return RemoteClass(r, self._client)
+            return RemoteClass(r)
         else:
             return r
 
@@ -500,7 +507,7 @@ class Remote(object):
         return ar
         if isinstance(r, Ref):
             RemoteClass = distob.engine.proxy_types[r.type]
-            return RemoteClass(r, self._client)
+            return RemoteClass(r)
         else:
             return r
 
@@ -520,8 +527,8 @@ class Remote(object):
 
     def __copy__(self):
         newref = copy.copy(self._ref)
-        obj = self.__class__.__new__(self.__class__, newref, self._client)
-        obj.__init__(newref, self._client)
+        obj = self.__class__.__new__(self.__class__, newref)
+        obj.__init__(newref)
         return obj
 
     def __deepcopy__(self, memo):
@@ -706,15 +713,61 @@ def _ars_to_proxies(ars, obj):
             RemoteClass = type(
                     'Remote' + ObClass.__name__, (Remote, ObClass), dict())
             RemoteClass = proxy_methods(ObClass)(RemoteClass)
-        proxy_obj = RemoteClass(ref, distob.engine._client)
+        proxy_obj = RemoteClass(ref)
         return proxy_obj
     else:
         raise DistobTypeError('Unpacking ars: unexpected type %s' % type(ars))
 
 
-def scatter(obj):
-    """Distribute obj or list to remote engines, returning proxy objects"""
-    if isinstance(obj, Remote):
+def _scatter_ndarray(ar, axis=None):
+    """Turn a numpy ndarray into a distributed array"""
+    from .arrays import DistArray, RemoteArray
+    shape = ar.shape
+    ndim = len(shape)
+    if axis is None:
+        axis = ndim - 1
+    n = shape[axis]
+    if distob.engine is None:
+        _setup_engines()
+    num_engines = len(distob.engine._client)
+    if n > num_engines * 100:
+        message = (u'Currently have only implemented splitting an axis into '
+                    'chunks of length 1. axis %d is long (%d), so may be slow '
+                    'distributing the array along this axis.' % (axis, n))
+        warnings.warn(message, RuntimeWarning)
+    if isinstance(ar, DistArray):
+        if axis == ar._distaxis:
+            return ar
+        else:
+            raise DistobError('Currently can only scatter one axis of array')
+    # Currently, if requested to scatter an array that is already Remote, will
+    # first get the whole array locally, then scatter. Not really optimal.
+    if isinstance(ar, RemoteArray):
+        ar = ar._ob
+    s = slice(None)
+    subarrays = []
+    for i in range(n):
+        index = (s,)*axis + (i,) + (s,)*(ndim - axis - 1)
+        subarrays.append(ar[index])
+    subarrays = scatter(subarrays)
+    refs = [ra._ref for ra in subarrays]
+    return DistArray(refs, axis)
+
+
+def scatter(obj, axis=None):
+    """Distribute obj or list to remote engines, returning proxy objects
+    Args:
+      obj: any python object, or list of objects
+      axis (int, optional): currently only used if scattering a numpy array,
+        specifying along which axis to split the array to distribute it. 
+        If None, the default is to split along the last axis.
+    """
+    if _have_numpy and (isinstance(obj, np.ndarray) or
+                        hasattr(type(obj), '__array_interface__')):
+        return _scatter_ndarray(obj, axis)
+    if axis is not None:
+        raise DistobValueError('`axis` argument only applies to ndarrays')
+    elif isinstance(obj, Remote):
         return obj
     ars = _async_scatter(obj)
     proxy_obj = _ars_to_proxies(ars, obj)
@@ -723,6 +776,10 @@ def scatter(obj):
 
 def gather(obj):
     """Retrieve objects that have been distributed, making them local again"""
+    if _have_numpy:
+        from .arrays import DistArray
+        if isinstance(obj, DistArray):
+            return obj._ob
     if not isinstance(obj, Remote) and (
             isinstance(obj, basestring) or (
                 not isinstance(obj, collections.Sequence))):
@@ -756,5 +813,5 @@ def call_all(sequence, method_name, *args, **kwargs):
         if isinstance(results[i], Ref):
             ref = results[i]
             RemoteClass = distob.engine.proxy_types[ref.type]
-            results[i] = RemoteClass(ref, distob.engine._client)
+            results[i] = RemoteClass(ref)
     return results

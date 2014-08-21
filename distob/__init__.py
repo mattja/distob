@@ -7,6 +7,7 @@ __version__ = '0.1.2'
 
 # If numpy is available, provide RemoteArray and DistArray
 try:
-    from .arrays import RemoteArray, DistArray
+    from .arrays import (RemoteArray, DistArray, transpose, rollaxis, 
+                         expand_dims, concatenate, vstack, hstack, dstack)
 except ImportError:
     pass
