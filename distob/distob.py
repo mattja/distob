@@ -37,6 +37,12 @@ try:
 except ImportError:
     pass
 
+# types for compatibility across python 2 and 3
+try:
+    string_types = basestring
+except NameError:
+    string_types = str
+
 
 class Error(Exception):
     pass
@@ -484,7 +490,7 @@ class Remote(object):
         try:
             return self._cached_apply(method_name, *args, **kwargs)
         except TypeError as te:
-            if te.message[:15] == 'unhashable type':
+            if te.args[0][:15] == 'unhashable type':
                 #print("unhashable. won't be able to cache")
                 return self._apply(method_name, *args, **kwargs)
             else:
@@ -662,14 +668,14 @@ def _async_scatter(obj):
     Return an async result or (possibly nested) lists of async results, 
     each of which is a Ref
     """
-    #TODO Instead of special cases for basestring and Remote, should have a 
-    #     list of types that should not be proxied, inc. basestring and Remote.
+    #TODO Instead of special cases for strings and Remote, should have a
+    #     list of types that should not be proxied, inc. strings and Remote.
     if isinstance(obj, Remote):
         return obj
     if (isinstance(obj, collections.Sequence) and 
-            not isinstance(obj, basestring)):
+            not isinstance(obj, string_types)):
         ars = []
-        for i in xrange(len(obj)):
+        for i in range(len(obj)):
             ars.append(_async_scatter(obj[i]))
         return ars
     else:
@@ -700,7 +706,7 @@ def _ars_to_proxies(ars, obj):
     if isinstance(ars, Remote):
         return ars
     elif isinstance(ars, collections.Sequence):
-        for i in xrange(len(ars)):
+        for i in range(len(ars)):
             obj[i] = _ars_to_proxies(ars[i], obj[i])
         return obj
     elif isinstance(ars, parallel.AsyncResult):
@@ -781,11 +787,11 @@ def gather(obj):
         if isinstance(obj, DistArray):
             return obj._ob
     if not isinstance(obj, Remote) and (
-            isinstance(obj, basestring) or (
+            isinstance(obj, string_types) or (
                 not isinstance(obj, collections.Sequence))):
         return obj
     elif not isinstance(obj, Remote):
-        for i in xrange(len(obj)):
+        for i in range(len(obj)):
             obj[i] = gather(obj[i])
         return None
     else:
@@ -805,7 +811,7 @@ def call_all(sequence, method_name, *args, **kwargs):
         else: 
             results.append(getattr(obj, method_name)(*args, **kwargs))
     # now wait for all results before returning
-    for i in xrange(len(results)):
+    for i in range(len(results)):
         obj = results[i]
         if isinstance(obj, parallel.AsyncResult):
             obj.wait()
