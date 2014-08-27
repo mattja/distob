@@ -369,10 +369,11 @@ class DistArray(object):
                 nonconstant_ix_axes = []
                 for j in range(idim):
                     n = distix.shape[j]
-                    partix = np.split(distix, n, axis=j)
-                    if not all(np.array_equal(
-                            partix[0], partix[i]) for i in range(1, n)):
-                        nonconstant_ix_axes.append(j)
+                    if n > 0:
+                        partix = np.split(distix, n, axis=j)
+                        if not all(np.array_equal(
+                                partix[0], partix[i]) for i in range(1, n)):
+                            nonconstant_ix_axes.append(j)
                 if len(nonconstant_ix_axes) <= 1:
                     # then we can apply the indexing without moving data
                     if len(nonconstant_ix_axes) is 0:
