@@ -1,7 +1,8 @@
 """Remote and distributed numpy arrays
 """
 
-from .distob import proxy_methods, Remote, Error, scatter, gather
+from __future__ import absolute_import
+from .distob import proxy_methods, Remote, Ref, Error, scatter, gather
 import numpy as np
 from collections import Sequence
 import numbers
@@ -14,6 +15,15 @@ _SliceType = type(slice(None))
 _EllipsisType = type(Ellipsis)
 _TupleType = type(())
 _NewaxisType = type(np.newaxis)
+
+
+def _brief_warning(msg, stacklevel=None):
+    old_format = warnings.formatwarning
+    def brief_format(message, category, filename, lineno, line=None):
+        return '%s [%s:%d]' % (msg, filename, lineno)
+    warnings.formatwarning = brief_format
+    warnings.warn(msg, RuntimeWarning, stacklevel + 1)
+    warnings.formatwarning = old_format
 
 
 @proxy_methods(np.ndarray, include_underscore=(
@@ -37,7 +47,10 @@ class RemoteArray(Remote, object):
     #If a local consumer wants direct data access via the python 
     #array interface, then ensure a local copy of the data is in memory
     def __get_array_intf(self):
-        #print('__array_interface__ requested.')
+        if not self._obcache_current:
+            msg = (u"Note: local numpy function requested local access to " +
+                    "data. Fetching data..")
+            _brief_warning(msg, stacklevel=4)
         self._fetch()
         self._array_intf['data'] = self._obcache.__array_interface__['data']
         return self._array_intf
@@ -556,10 +569,11 @@ def _remote_to_array(remote):
     if isinstance(remote, RemoteArray):
         return remote
     else:
-        dv = distob.engine._client[remote._ref.engine_id]
+        from distob import engine
+        dv = engine._client[remote._ref.engine_id]
         def remote_array(object_id):
             return Ref(np.array(engine[object_id]))
-        return dv.apply_sync(remote_array, remote._ref.object_id)
+        return RemoteArray(dv.apply_sync(remote_array, remote._ref.object_id))
 
 
 def concatenate(tup, axis=0):
@@ -592,12 +606,14 @@ def concatenate(tup, axis=0):
                 # one axis, will have to fetch and re-scatter on the new axis.
                 ar = gather(ar)
                 arrays.extend(np.split(ar, ar.shape[axis], axis))
-        elif isinstance(ar, Remote) and not isinstance(ar, RemoteArray):
-            arrays += _remote_to_array(ar)
+        elif isinstance(ar, RemoteArray):
+            arrays.append(ar)
+        elif isinstance(ar, Remote):
+            arrays.append(_remote_to_array(ar))
         elif (not isinstance(ar, Remote) and 
                 not isinstance(ar, DistArray) and
                 not hasattr(type(ar), '__array_interface__')):
-            arrays += np.array(ar)
+            arrays.append(np.array(ar))
     rarrays = scatter(arrays)
     # At this point rarrays should be a list of RemoteArray to be concatenated
     concatenation_axis_lengths = [ra.shape[axis] for ra in rarrays]
@@ -609,17 +625,21 @@ def concatenate(tup, axis=0):
     eng_id = refs[0].engine_id
     if all(ref.engine_id == eng_id for ref in refs):
         # Arrays to be joined are all on the same engine
+        from distob import engine
         if eng_id == engine.id:
             # All are on local host. Concatenate to a ndarray.
-            return np.concatenate([engine[r.object_id] for r in refs], axis)
+            return np.concatenate(
+                    [engine[r.object_id] for r in refs], axis)
         else:
             # All are on the same remote host. Concatenate to a RemoteArray.
             ids = [ref.object_id for ref in refs]
-            dv = distob.engine._client[eng_id]
+            dv = engine._client[eng_id]
             def remote_concat(ids, axis):
+                from distob import engine
                 ar = np.concatenate([engine[id] for id in ids], axis)
                 return Ref(ar)
-            return dv.apply_sync(remote_concat, ids, axis)
+            ref = dv.apply_sync(remote_concat, ids, axis)
+            return RemoteArray(ref)
     else:
         # Arrays to be joined are on different engines.
         return DistArray(refs, axis)
