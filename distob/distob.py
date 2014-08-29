@@ -314,10 +314,16 @@ def _setup_engines(client=None):
       client (IPython.parallel.client, optional): If None, will create a client         using the default IPython profile.
     """
     if not client:
-        client = parallel.Client()
+        try:
+            client = parallel.Client()
+        except:
+            raise DistobClusterError(
+                u"""Could not connect to an IPython parallel cluster. Make
+                 sure a cluster is started (e.g. to use the CPUs of a
+                 single computer, can type 'ipcluster start')""")
     ids = client.ids
     if not ids:
-        raise DistobClusterError('No IPython compute engines are available')
+        raise DistobClusterError(u'No IPython compute engines are available')
     dv = client[ids]
     dv.use_dill()
     with dv.sync_imports(quiet=True):
