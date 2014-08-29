@@ -136,10 +136,10 @@ class DistArray(object):
         """Make a DistArray from a list of existing remote numpy.ndarrays
 
         Args:
-          subarrays (list of Ref): list of references to subarrays (possibly
-            remote) which form the whole array when concatenated. The subarrays
-            must all have the same shape and dtype.
-          axis (int, optional): Position of concatenation axis. 
+          subarrays (list of RemoteArray, or list of Ref to ndarray): 
+            the subarrays (possibly remote) which form the whole array when
+            concatenated. The subarrays must all have the same shape and dtype.
+          axis (int, optional): Position of the distributed axis.
             If n subarrays are given, each of shape (i1, i2, ..., iK), 
             and `axis` is not given, the resulting DistArray will have shape 
             (i1, i2, ..., iK, n). But if `axis` is given then the subarrays 
@@ -150,10 +150,13 @@ class DistArray(object):
             raise ValueError('must provide more than one subarray')
         self._obcache = None
         self._obcache_current = False
-        first_array_metadata = subarrays[0].metadata
-        if not all(ref.metadata == first_array_metadata for ref in subarrays):
+        # In the subarrays list, accept either RemoteArray or Ref to ndarray:
+        subarrays = [ra if isinstance(ra, RemoteArray)
+                     else RemoteArray(ra) for ra in subarrays]
+        first_ra_metadata = subarrays[0]._ref.metadata
+        if not all(ra._ref.metadata == first_ra_metadata for ra in subarrays):
             raise ValueError('subarrays must have same shape, strides & dtype')
-        descr, subshape, substrides, typestr = first_array_metadata
+        descr, subshape, substrides, typestr = first_ra_metadata
         itemsize = int(typestr[2:])
         if axis is None:
             self._distaxis = len(subshape)
@@ -170,7 +173,7 @@ class DistArray(object):
         strides = list(substrides)
         strides.insert(self._distaxis, int(np.product(subshape)*itemsize))
         strides = tuple(strides)
-        self._subarrays = [RemoteArray(ref) for ref in subarrays]
+        self._subarrays = subarrays
         # a surrogate ndarray to help with slicing of the distributed axis:
         self._placeholders = np.array(range(len(subarrays)), dtype=int)
         # implement the python array interface
@@ -330,6 +333,7 @@ class DistArray(object):
             raise IndexError('too many indices for array')
         if basic_slicing:
             # separate the index acting on distributed axis from other indices
+            print('in DistArray, basic slicing')
             distix = index[distaxis]
             otherix = index[0:distaxis] + index[(distaxis+1):]
             ixlist = self._placeholders[distix]
@@ -341,9 +345,10 @@ class DistArray(object):
             if len(result_ras) is 1:
                 return result_ras[0] #no longer distributed: return RemoteArray
             else:
-                return DistArray([ra._ref for ra in result_ras], new_distaxis)
+                return DistArray(result_ras, new_distaxis)
         else:
             # advanced integer slicing
+            print('in DistArray, advanced integer indexing')
             is_fancy = tuple(not isinstance(x, _SliceType) for x in index)
             fancy_pos = tuple(i for i in range(len(index)) if is_fancy[i])
             slice_pos = tuple(i for i in range(len(index)) if not is_fancy[i])
@@ -448,7 +453,7 @@ class DistArray(object):
                 # no longer distributed: return a RemoteArray
                 return expand_dims(result_ras[0], new_distaxis)
             else:
-                return DistArray([ra._ref for ra in result_ras], new_distaxis)
+                return DistArray(result_ras, new_distaxis)
 
     def __setitem__(self, index, value):
         """Assign to the sliced item"""
@@ -561,7 +566,7 @@ def expand_dims(a, axis):
             subaxis = axis - 1
             new_distaxis = a._distaxis
         new_subarrays = [expand_dims(ra, subaxis) for ra in a._subarrays]
-        return DistArray([ra._ref for ra in new_subarrays], new_distaxis)
+        return DistArray(new_subarrays, new_distaxis)
 
 
 def _remote_to_array(remote):
@@ -614,7 +619,7 @@ def concatenate(tup, axis=0):
                 not isinstance(ar, DistArray) and
                 not hasattr(type(ar), '__array_interface__')):
             arrays.append(np.array(ar))
-    rarrays = scatter(arrays)
+    rarrays = scatter(arrays) # TODO: this will only work if on the client
     # At this point rarrays should be a list of RemoteArray to be concatenated
     concatenation_axis_lengths = [ra.shape[axis] for ra in rarrays]
     if not all(n == 1 for n in concatenation_axis_lengths):
@@ -627,11 +632,11 @@ def concatenate(tup, axis=0):
         # Arrays to be joined are all on the same engine
         from distob import engine
         if eng_id == engine.id:
-            # All are on local host. Concatenate to a ndarray.
-            return np.concatenate(
-                    [engine[r.object_id] for r in refs], axis)
+            # All are on local host. Concatenate the local objects:
+            return concatenate([engine[r.object_id] for r in refs], axis)
         else:
             # All are on the same remote host. Concatenate to a RemoteArray.
+            # TODO: allow concatenating Timeseries without returning ndarray
             ids = [ref.object_id for ref in refs]
             dv = engine._client[eng_id]
             def remote_concat(ids, axis):
@@ -642,7 +647,7 @@ def concatenate(tup, axis=0):
             return RemoteArray(ref)
     else:
         # Arrays to be joined are on different engines.
-        return DistArray(refs, axis)
+        return DistArray(rarrays, axis)
 
 
 def vstack(tup):
