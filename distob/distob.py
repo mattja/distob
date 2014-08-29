@@ -31,11 +31,8 @@ import warnings
 import importlib
 import collections
 
-try:
+if distob._have_numpy:
     import numpy as np
-    _have_numpy = True
-except ImportError:
-    pass
 
 # types for compatibility across python 2 and 3
 try:
@@ -768,7 +765,7 @@ def scatter(obj, axis=None):
         specifying along which axis to split the array to distribute it. 
         If None, the default is to split along the last axis.
     """
-    if _have_numpy and (isinstance(obj, np.ndarray) or
+    if distob._have_numpy and (isinstance(obj, np.ndarray) or
                         hasattr(type(obj), '__array_interface__')):
         return _scatter_ndarray(obj, axis)
     if axis is not None:
@@ -782,7 +779,7 @@ def scatter(obj, axis=None):
 
 def gather(obj):
     """Retrieve objects that have been distributed, making them local again"""
-    if _have_numpy:
+    if distob._have_numpy:
         from .arrays import DistArray
         if isinstance(obj, DistArray):
             return obj._ob
