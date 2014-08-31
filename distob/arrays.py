@@ -338,13 +338,17 @@ class DistArray(object):
             otherix = index[0:distaxis] + index[(distaxis+1):]
             ixlist = self._placeholders[distix]
             if isinstance(ixlist, numbers.Number):
-                ixlist = [ixlist]
+                # distributed axis has been sliced away: return a RemoteArray
+                return self._subarrays[ixlist][otherix]
             some_subarrays = [self._subarrays[i] for i in ixlist]
             result_ras = [ra[otherix] for ra in some_subarrays]
-            new_distaxis = distaxis
             if len(result_ras) is 1:
-                return result_ras[0] #no longer distributed: return RemoteArray
+                # no longer distributed: return a RemoteArray
+                return expand_dims(result_ras[0], distaxis)
             else:
+                axes_removed = sum(1 for x in index[:distaxis] if isinstance(
+                        x, numbers.Integral))
+                new_distaxis = distaxis - axes_removed
                 return DistArray(result_ras, new_distaxis)
         else:
             # advanced integer slicing
@@ -379,7 +383,7 @@ class DistArray(object):
                 else:
                     earlier_fancy = len([i for i in fancy_pos if i < distaxis])
                     new_distaxis = distaxis - earlier_fancy + idim
-                remove_axis = ((slice(None),)*(new_distaxis - 1) + (0,) + 
+                remove_axis = ((slice(None),)*(new_distaxis) + (0,) + 
                                (slice(None),)*(self.ndim - new_distaxis - 1))
                 result_ras = [ra[subix][remove_axis] for ra in some_subarrays]
             else:
