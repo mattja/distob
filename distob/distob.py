@@ -759,8 +759,7 @@ def _scatter_ndarray(ar, axis=None):
         index = (s,)*axis + (i,) + (s,)*(ndim - axis - 1)
         subarrays.append(ar[index])
     subarrays = scatter(subarrays)
-    refs = [ra._ref for ra in subarrays]
-    return DistArray(refs, axis)
+    return DistArray(subarrays, axis)
 
 
 def scatter(obj, axis=None):
@@ -771,6 +770,8 @@ def scatter(obj, axis=None):
         specifying along which axis to split the array to distribute it. 
         If None, the default is to split along the last axis.
     """
+    if hasattr(obj, '__distob_scatter__'):
+        return obj.__distob_scatter__(axis)
     if distob._have_numpy and (isinstance(obj, np.ndarray) or
                         hasattr(type(obj), '__array_interface__')):
         return _scatter_ndarray(obj, axis)
