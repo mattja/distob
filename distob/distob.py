@@ -698,20 +698,20 @@ def _async_scatter(obj):
 _async_scatter.next_engine = 0
 
 
-def _ars_to_proxies(ars, obj):
-    """wait for async results and return proxy objects to replace obj
+def _ars_to_proxies(ars):
+    """wait for async results and return proxy objects
     Args: 
       ars: AsyncResult (or sequence of AsyncResults), each result type ``Ref``.
-      obj: original object being scattered (or sequence of objects)
     Returns:
-      Remote* proxy object (or sequence of them) with same interface as obj
+      Remote* proxy object (or list of them)
     """
     if isinstance(ars, Remote):
         return ars
     elif isinstance(ars, collections.Sequence):
+        res = []
         for i in range(len(ars)):
-            obj[i] = _ars_to_proxies(ars[i], obj[i])
-        return obj
+            res.append(_ars_to_proxies(ars[i]))
+        return res
     elif isinstance(ars, parallel.AsyncResult):
         ars.wait()
         ref = ars.r
@@ -780,7 +780,7 @@ def scatter(obj, axis=None):
     elif isinstance(obj, Remote):
         return obj
     ars = _async_scatter(obj)
-    proxy_obj = _ars_to_proxies(ars, obj)
+    proxy_obj = _ars_to_proxies(ars)
     return proxy_obj
 
 
@@ -795,11 +795,74 @@ def gather(obj):
                 not isinstance(obj, collections.Sequence))):
         return obj
     elif not isinstance(obj, Remote):
-        for i in range(len(obj)):
-            obj[i] = gather(obj[i])
-        return None
+        return [gather(subobj) for subobj in obj]
     else:
         return obj._ob
+
+
+def vectorize(f):
+    """Upgrade normal function f to act in parallel on distibuted lists/arrays
+
+    Args:
+      f (callable): an ordinary function which expects as its first argument a
+        single object, or a numpy array of N dimensions.
+
+    Returns:
+      vf (callable): new function that takes as its first argument a list of
+        objects, or a array of N+1 dimensions. ``vf()`` will do the
+        computation ``f()`` on each part of the input in parallel and will
+        return a list of results, or a distributed array of results.
+    """
+    def vf(obj, *args, **kwargs):
+        # Allow user classes to customize how to vectorize a function:
+        if hasattr(obj, '__distob_vectorize__'):
+            return obj.__distob_vectorize__(f)(obj, *args, **kwargs)
+        elif distob._have_numpy and (isinstance(obj, np.ndarray) or
+                 hasattr(type(obj), '__array_interface__')):
+            distarray = scatter(obj, axis=None)
+            return vf(distarray, *args, **kwargs)
+        elif isinstance(obj, collections.Sequence):
+            inputs = scatter(obj)
+            def remote_f(object_id, *args, **kwargs):
+                result = f(distob.engine[object_id], *args, **kwargs)
+                if type(result) in distob.engine.proxy_types:
+                    return Ref(result)
+                else:
+                    return result
+            dv = distob.engine._client[:]
+            results = []
+            for ref in refs:
+                dv.targets = ref.engine_id
+                ar = dv.apply_async(remote_f, ref.object_id, *args, **kwargs)
+                results.append(ar)
+            for i in range(len(results)):
+                ar = results[i]
+                ar.wait()
+                results[i] = ar.r
+                if isinstance(results[i], Ref):
+                    ref = results[i]
+                    RemoteClass = distob.engine.proxy_types[ref.type]
+                    results[i] = RemoteClass(ref)
+            return results
+    if hasattr(f, '__name__'):
+        vf.__name__ = 'v' + f.__name__
+        f_str = f.__name__ + '()'
+    else:
+        f_str = 'callable'
+    doc = u"""Apply %s in parallel to a list or array\n
+           Args:
+             obj (Sequence of objects or an array)
+             other args are the same as for %s
+           """ % (f_str, f_str)
+    if hasattr(f, '__doc__') and f.__doc__ is not None:
+        doc = doc.rstrip() + (' detailed below:\n----------\n' + f.__doc__)
+    vf.__doc__ = doc
+    return vf
+
+
+def apply(f, obj, *args, **kwargs):
+    """Apply a function in parallel to each element of the input"""
+    return vectorize(f)(obj, *args, **kwargs)
 
 
 def call_all(sequence, method_name, *args, **kwargs):

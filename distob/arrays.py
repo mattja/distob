@@ -333,7 +333,6 @@ class DistArray(object):
             raise IndexError('too many indices for array')
         if basic_slicing:
             # separate the index acting on distributed axis from other indices
-            print('in DistArray, basic slicing')
             distix = index[distaxis]
             otherix = index[0:distaxis] + index[(distaxis+1):]
             ixlist = self._placeholders[distix]
@@ -352,7 +351,6 @@ class DistArray(object):
                 return DistArray(result_ras, new_distaxis)
         else:
             # advanced integer slicing
-            print('in DistArray, advanced integer indexing')
             is_fancy = tuple(not isinstance(x, _SliceType) for x in index)
             fancy_pos = tuple(i for i in range(len(index)) if is_fancy[i])
             slice_pos = tuple(i for i in range(len(index)) if not is_fancy[i])
@@ -483,6 +481,75 @@ class DistArray(object):
 
     T = property(fget=transpose)
 
+    @classmethod
+    def __distob_vectorize__(cls, f):
+        """Upgrades a normal function f to act on a DistArray in parallel
+
+        Args:
+          f (callable): ordinary function which expects as its first 
+            argument an array (of the same shape as our subarrays)
+
+        Returns:
+          vf (callable): new function that takes a DistArray as its first
+            argument. ``vf(distarray)`` will do the computation ``f(subarray)``
+            on each subarray in parallel and if possible will return another 
+            DistArray. (otherwise will return a list with the result for each 
+            subarray).
+        """
+        def vf(self, *args, **kwargs):
+            refs = [ra._ref for ra in self._subarrays]
+            dv = distob.engine._client[:]
+            def remote_f(object_id, *args, **kwargs):
+                result = f(distob.engine[object_id], *args, **kwargs)
+                if type(result) in distob.engine.proxy_types:
+                    return Ref(result)
+                else:
+                    return result
+            results = []
+            for ref in refs:
+                dv.targets = ref.engine_id
+                ar = dv.apply_async(remote_f, ref.object_id, *args, **kwargs)
+                results.append(ar)
+            for i in range(len(results)):
+                ar = results[i]
+                ar.wait()
+                results[i] = ar.r
+                if isinstance(results[i], Ref):
+                    ref = results[i]
+                    RemoteClass = distob.engine.proxy_types[ref.type]
+                    results[i] = RemoteClass(ref)
+            if (all(isinstance(r, RemoteArray) for r in results) and
+                    all(r.shape == results[0].shape for r in results)):
+                # Then we can join the results and return a DistArray.
+                # We will keep the same axis distributed as in the input,
+                # unless the results have more dimensions than the input.
+                res_subshape = results[0].shape
+                if len(res_subshape) > self.ndim - 1:
+                    res_distaxis = len(res_subshape)
+                else:
+                    res_distaxis = self._distaxis
+                newaxes = res_distaxis - len(res_subshape)
+                if newaxes >= 1:
+                    ix = ((slice(None),) * len(res_subshape) + 
+                          (np.newaxis,) * newaxes)
+                    results = [r[ix] for r in results]
+                return DistArray(results, res_distaxis)
+            else:
+                return results
+        if hasattr(f, '__name__'):
+            vf.__name__ = 'v' + f.__name__
+            f_str = f.__name__ + '()'
+        else:
+            f_str = 'callable'
+        doc = u"""Apply %s in parallel to a DistArray\n
+               Args:
+                 da (DistArray)
+                 other args are the same as for %s
+               """ % (f_str, f_str)
+        if hasattr(f, '__doc__') and f.__doc__ is not None:
+            doc = doc.rstrip() + (' detailed below:\n----------\n' + f.__doc__)
+        vf.__doc__ = doc
+        return vf
 
 def transpose(a, axes=None):
     """Returns a view of the array with axes transposed.

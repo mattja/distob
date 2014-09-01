@@ -21,9 +21,9 @@ In particular, sending numpy arrays to the cluster is supported. (Will
 require numpy 1.9.0b1 or later for full functionality with remote
 ufuncs)
 
-A numpy array can also be scattered across the cluster, along a particular 
-axis. Operations on the array will then automatically be split up and done 
-in parallel (still work in progress). 
+A numpy array can also be scattered across the cluster, along a particular
+axis. Operations on the array can then automatically be split up and done
+in parallel (using ``vectorize()`` below)
 
 Distob is an object layer built on top of IPython.parallel, so it will
 make use of your default IPython parallel profile. This allows different
@@ -34,6 +34,10 @@ functions
 
 | ``scatter(obj)`` Distribute any object (or list of objects) to remote iPython engines, return a proxy.
 | ``gather(obj)`` Fetch back a distributed object (or list), making it local again.
+|
+| ``vectorize(f)`` Turn an ordinary function (that expects a single object or array) into one that acts in parallel on a distributed list or distributed array.
+| ``apply(f, obj)`` Same as ``vectorize(f)(obj)``
+
 
 distributed numpy arrays
 ~~~~~~~~~~~~~~~~~~~~~~~~
