@@ -35,8 +35,7 @@ functions
 | ``scatter(obj)`` Distribute any object (or list of objects) to remote iPython engines, return a proxy.
 | ``gather(obj)`` Fetch back a distributed object (or list), making it local again.
 |
-| ``vectorize(f)`` Turn an ordinary function (that expects a single object or array) into one that acts in parallel on a distributed list or distributed array.
-| ``apply(f, obj)`` Same as ``vectorize(f)(obj)``
+| ``vectorize(f)`` Turn an ordinary function (that takes a single object or array) into one that acts in parallel on a scattered list or array. ``apply(f, obj)`` is the same as ``vectorize(f)(obj)``
 
 
 distributed numpy arrays

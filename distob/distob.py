@@ -673,7 +673,7 @@ def _async_scatter(obj):
     """
     #TODO Instead of special cases for strings and Remote, should have a
     #     list of types that should not be proxied, inc. strings and Remote.
-    if isinstance(obj, Remote):
+    if isinstance(obj, Remote) or obj is None:
         return obj
     if (isinstance(obj, collections.Sequence) and 
             not isinstance(obj, string_types)):
@@ -705,7 +705,7 @@ def _ars_to_proxies(ars):
     Returns:
       Remote* proxy object (or list of them)
     """
-    if isinstance(ars, Remote):
+    if isinstance(ars, Remote) or ars is None:
         return ars
     elif isinstance(ars, collections.Sequence):
         res = []
@@ -744,6 +744,8 @@ def _scatter_ndarray(ar, axis=None):
                     'chunks of length 1. axis %d is long (%d), so may be slow '
                     'distributing the array along this axis.' % (axis, n))
         warnings.warn(message, RuntimeWarning)
+    if n is 1:
+        return scatter([ar])[0]
     if isinstance(ar, DistArray):
         if axis == ar._distaxis:
             return ar
@@ -814,21 +816,29 @@ def vectorize(f):
         return a list of results, or a distributed array of results.
     """
     def vf(obj, *args, **kwargs):
-        # Allow user classes to customize how to vectorize a function:
+        # user classes can customize how to vectorize a function:
         if hasattr(obj, '__distob_vectorize__'):
             return obj.__distob_vectorize__(f)(obj, *args, **kwargs)
+        def remote_f(object_id, *args, **kwargs):
+            result = f(distob.engine[object_id], *args, **kwargs)
+            if type(result) in distob.engine.proxy_types:
+                return Ref(result)
+            else:
+                return result
+        if isinstance(obj, Remote):
+            dv = distob.engine._client[obj._ref.engine_id]
+            r = dv.apply_sync(remote_f, obj._ref.object_id, *args, **kwargs)
+            if isinstance(r, Ref):
+                RemoteClass = distob.engine.proxy_types[r.type]
+                return RemoteClass(r)
+            else:
+                return r
         elif distob._have_numpy and (isinstance(obj, np.ndarray) or
                  hasattr(type(obj), '__array_interface__')):
             distarray = scatter(obj, axis=None)
             return vf(distarray, *args, **kwargs)
         elif isinstance(obj, collections.Sequence):
             inputs = scatter(obj)
-            def remote_f(object_id, *args, **kwargs):
-                result = f(distob.engine[object_id], *args, **kwargs)
-                if type(result) in distob.engine.proxy_types:
-                    return Ref(result)
-                else:
-                    return result
             dv = distob.engine._client[:]
             results = []
             for ref in refs:
