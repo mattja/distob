@@ -551,6 +551,10 @@ class DistArray(object):
         vf.__doc__ = doc
         return vf
 
+    def __distob_gather__(self):
+        return self._ob
+
+
 def transpose(a, axes=None):
     """Returns a view of the array with axes transposed.
 

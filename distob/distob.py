@@ -528,11 +528,14 @@ class Remote(object):
             self._obcache_current = True
 
     def __ob(self):
-        """return a copy of the real object"""
+        """return a local copy of the real object"""
         self._fetch()
         return self._obcache
 
     _ob = property(fget=__ob)
+
+    def __distob_gather__(self):
+        return self._ob
 
     def __copy__(self):
         newref = copy.copy(self._ref)
@@ -788,18 +791,13 @@ def scatter(obj, axis=None):
 
 def gather(obj):
     """Retrieve objects that have been distributed, making them local again"""
-    if distob._have_numpy:
-        from .arrays import DistArray
-        if isinstance(obj, DistArray):
-            return obj._ob
-    if not isinstance(obj, Remote) and (
-            isinstance(obj, string_types) or (
-                not isinstance(obj, collections.Sequence))):
-        return obj
-    elif not isinstance(obj, Remote):
+    if hasattr(obj, '__distob_gather__'):
+        return obj.__distob_gather__()
+    elif (isinstance(obj, collections.Sequence) and 
+            not isinstance(obj, string_types)):
         return [gather(subobj) for subobj in obj]
     else:
-        return obj._ob
+        return obj
 
 
 def vectorize(f):
