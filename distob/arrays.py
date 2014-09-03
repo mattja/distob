@@ -20,7 +20,7 @@ _NewaxisType = type(np.newaxis)
 def _brief_warning(msg, stacklevel=None):
     old_format = warnings.formatwarning
     def brief_format(message, category, filename, lineno, line=None):
-        return '%s [%s:%d]' % (msg, filename, lineno)
+        return '%s [%s:%d]\n' % (msg, filename, lineno)
     warnings.formatwarning = brief_format
     warnings.warn(msg, RuntimeWarning, stacklevel + 1)
     warnings.formatwarning = old_format
@@ -126,6 +126,92 @@ class RemoteArray(Remote, object):
         print('In __array_wrap__')
         return np.ndarray.__array_wrap__(out_arr, context)
 
+    def expand_dims(self, axis):
+        """Insert a new axis, at a given position in the array shape
+        Args:
+          axis (int): Position (amongst axes) where new axis is to be inserted.
+        """
+        ix = [slice(None)] * self.ndim
+        ix.insert(axis, np.newaxis)
+        ix = tuple(ix)
+        return self[ix]
+
+    def concatenate(self, tup, axis=0):
+        """Join a sequence of arrays to this one.
+
+        Will aim to join `ndarray`, `RemoteArray`, and `DistArray` without
+        moving their data if they are on different engines.
+
+        Args: 
+          tup (sequence of array_like): Arrays to be joined with this one.
+            They must have the same shape as this array, except in the
+            dimension corresponding to `axis`.
+          axis (int, optional): The axis along which arrays will be joined.
+
+        Returns:
+          res `RemoteArray`, if arrays were all on the same engine
+              `DistArray`, if inputs were on different engines
+        """
+        if not isinstance(tup, Sequence):
+            tup = (tup,)
+        if tup is (None,) or len(tup) is 0:
+            return self
+        tup = (self,) + tuple(tup)
+        # convert all arguments to RemoteArrays if they are not already:
+        arrays = []
+        for ar in tup:
+            if isinstance(ar, DistArray):
+                if axis == ar._distaxis:
+                    ix_new_concat_axis = tuple(
+                        ([slice(None)]*(ar.ndim - 1)).insert(axis, np.newaxis))
+                    arrays.extend(
+                        [ra[ix_new_concat_axis] for ra in ar._subarrays])
+                else:
+                    # Since not yet implemented arrays distributed on more than
+                    # one axis, will fetch and re-scatter on the new axis.
+                    ar = gather(ar)
+                    arrays.extend(np.split(ar, ar.shape[axis], axis))
+            elif isinstance(ar, RemoteArray):
+                arrays.append(ar)
+            elif isinstance(ar, Remote):
+                arrays.append(_remote_to_array(ar))
+            elif (not isinstance(ar, Remote) and 
+                    not isinstance(ar, DistArray) and
+                    not hasattr(type(ar), '__array_interface__')):
+                arrays.append(np.array(ar))
+        rarrays = scatter(arrays) # TODO: this will only work on the client
+        # At this point rarrays is a list of RemoteArray to be concatenated
+        refs = [ra._ref for ra in rarrays]
+        eng_id = refs[0].engine_id
+        if all(ref.engine_id == eng_id for ref in refs):
+            # Arrays to be joined are all on the same engine
+            from distob import engine
+            if eng_id == engine.id:
+                # All are on local host. Concatenate the local objects:
+                return concatenate([engine[r.object_id] for r in refs], axis)
+            else:
+                # All are on the same remote host. Concatenate to a RemoteArray
+                ids = [ref.object_id for ref in refs]
+                dv = engine._client[eng_id]
+                def remote_concat(ids, axis):
+                    from distob import engine
+                    ar = np.concatenate([engine[id] for id in ids], axis)
+                    return Ref(ar)
+                ref = dv.apply_sync(remote_concat, ids, axis)
+                return RemoteArray(ref)
+        else:
+            # Arrays to be joined are on different engines.
+            concatenation_axis_lengths = [ra.shape[axis] for ra in rarrays]
+            if not all(n == 1 for n in concatenation_axis_lengths):
+                #TODO: should do it remotely, using distob.split()
+                msg = (u'Concatenating remote axes with lengths other than 1.'
+                        'current implementation will fetch all data locally!')
+                warnings.warn(msg, RuntimeWarning)
+                array = concatenate(distob.gather(rarrays), axis)
+                return distob.scatter(array, axis)
+            else:
+                return DistArray(rarrays, axis)
+
 
 class DistArray(object):
     """Local object representing a single array distributed on multiple engines
@@ -184,8 +270,8 @@ class DistArray(object):
         """update local cached copy of the real object"""
         if not self._obcache_current:
             ax = self._distaxis
-            self._obcache = np.concatenate(
-                    [np.expand_dims(ra._ob, ax) for ra in self._subarrays], ax)
+            self._obcache = concatenate(
+                    [expand_dims(ra._ob, ax) for ra in self._subarrays], ax)
             self._obcache_current = True
 
     def __ob(self):
@@ -554,6 +640,53 @@ class DistArray(object):
     def __distob_gather__(self):
         return self._ob
 
+    def expand_dims(self, axis):
+        """Insert a new axis, at a given position in the array shape
+        Args:
+          axis (int): Position (amongst axes) where new axis is to be inserted.
+        """
+        if axis <= self._distaxis:
+            subaxis = axis
+            new_distaxis = self._distaxis + 1
+        else:
+            subaxis = axis - 1
+            new_distaxis = self._distaxis
+        new_subarrays = [expand_dims(ra, subaxis) for ra in self._subarrays]
+        return DistArray(new_subarrays, new_distaxis)
+
+    def concatenate(self, tup, axis=0):
+        """Join a sequence of arrays to this one.
+
+        Will aim to join `ndarray`, `RemoteArray`, and `DistArray` without
+        moving their data if they are on different engines.
+
+        Args: 
+          tup (sequence of array_like): Arrays to be joined with this one.
+            They must have the same shape as this array, except in the
+            dimension corresponding to `axis`.
+          axis (int, optional): The axis along which arrays will be joined.
+
+        Returns:
+          res `RemoteArray`, if arrays were all on the same engine
+              `DistArray`, if inputs were on different engines
+        """
+        if not isinstance(tup, Sequence):
+            tup = (tup,)
+        if tup is (None,) or len(tup) is 0:
+            return self
+        if axis == self._distaxis:
+            ix_new_concat_axis = tuple(
+                    ([slice(None)]*(ar.ndim - 1)).insert(axis, np.newaxis))
+            split_self = [ra[ix_new_concat_axis] for ra in ar._subarrays]
+        else:
+            # Since we have not yet implemented arrays distributed on more than
+            # one axis, will fetch subarrays and re-scatter on the new axis.
+            split_self = distob.split(self._ob, self.shape[axis], axis)
+        first = split_self[0]
+        others = tuple(split_self[1:]) + tup
+        first = scatter(first)
+        return first.concatenate(others, axis)
+
 
 def transpose(a, axes=None):
     """Returns a view of the array with axes transposed.
@@ -626,22 +759,10 @@ def expand_dims(a, axis):
       a (array_like): Input array.
       axis (int): Position (amongst axes) where new axis is to be inserted.
     """
+    if hasattr(a, 'expand_dims') and hasattr(type(a), '__array_interface__'):
+        return a.expand_dims(axis)
     if isinstance(a, np.ndarray):
         return np.expand_dims(a, axis)
-    if isinstance(a, RemoteArray):
-        ix = [slice(None)] * a.ndim
-        ix.insert(axis, np.newaxis)
-        ix = tuple(ix)
-        return a[ix]
-    if isinstance(a, DistArray):
-        if axis <= a._distaxis:
-            subaxis = axis
-            new_distaxis = a._distaxis + 1
-        else:
-            subaxis = axis - 1
-            new_distaxis = a._distaxis
-        new_subarrays = [expand_dims(ra, subaxis) for ra in a._subarrays]
-        return DistArray(new_subarrays, new_distaxis)
 
 
 def _remote_to_array(remote):
@@ -671,58 +792,21 @@ def concatenate(tup, axis=0):
            `RemoteArray`, if inputs were all on the same remote engine
            `DistArray`, if inputs were already scattered on different engines
     """
+    if len(tup) is 0:
+        raise ValueError('need at least one array to concatenate')
+    first = tup[0]
+    others = tup[1:]
+    if (hasattr(first, 'concatenate') and 
+            hasattr(type(first), '__array_interface__')):
+        # This case includes RemoteArray and DistArray
+        return first.concatenate(others, axis)
     if all(isinstance(ar, np.ndarray) for ar in tup):
         return np.concatenate(tup, axis)
-    # otherwise convert all arguments to RemoteArrays if they are not already:
-    arrays = []
-    for ar in tup:
-        if isinstance(ar, DistArray):
-            if axis == ar._distaxis:
-                ix_new_concat_axis = tuple(
-                        ([slice(None)]*(ar.ndim - 1)).insert(axis, np.newaxis))
-                arrays.extend([ra[ix_new_concat_axis] for ra in ar._subarrays])
-            else:
-                # Since not yet implemented arrays distributed on more than
-                # one axis, will have to fetch and re-scatter on the new axis.
-                ar = gather(ar)
-                arrays.extend(np.split(ar, ar.shape[axis], axis))
-        elif isinstance(ar, RemoteArray):
-            arrays.append(ar)
-        elif isinstance(ar, Remote):
-            arrays.append(_remote_to_array(ar))
-        elif (not isinstance(ar, Remote) and 
-                not isinstance(ar, DistArray) and
-                not hasattr(type(ar), '__array_interface__')):
-            arrays.append(np.array(ar))
-    rarrays = scatter(arrays) # TODO: this will only work if on the client
-    # At this point rarrays should be a list of RemoteArray to be concatenated
-    concatenation_axis_lengths = [ra.shape[axis] for ra in rarrays]
-    if not all(n == 1 for n in concatenation_axis_lengths):
-        message = (u'So far have only implemented support for joining arrays '
-                    'where the axes being concatenated have length 1.')
-        raise Error(message)
-    refs = [ra._ref for ra in rarrays]
-    eng_id = refs[0].engine_id
-    if all(ref.engine_id == eng_id for ref in refs):
-        # Arrays to be joined are all on the same engine
-        from distob import engine
-        if eng_id == engine.id:
-            # All are on local host. Concatenate the local objects:
-            return concatenate([engine[r.object_id] for r in refs], axis)
-        else:
-            # All are on the same remote host. Concatenate to a RemoteArray.
-            # TODO: allow concatenating Timeseries without returning ndarray
-            ids = [ref.object_id for ref in refs]
-            dv = engine._client[eng_id]
-            def remote_concat(ids, axis):
-                from distob import engine
-                ar = np.concatenate([engine[id] for id in ids], axis)
-                return Ref(ar)
-            ref = dv.apply_sync(remote_concat, ids, axis)
-            return RemoteArray(ref)
+    if isinstance(first, Remote):
+        first = _remote_to_array(first)
     else:
-        # Arrays to be joined are on different engines.
-        return DistArray(rarrays, axis)
+        first = scatter(np.array(first)) #TODO: this only works on the client
+    return first.concatenate(others, axis)
 
 
 def vstack(tup):
@@ -784,3 +868,37 @@ def dstack(tup):
         if arrays[i].ndim is 2:
             arrays[i] = arrays[i][:, :, np.newaxis]
     return concatenate(arrays, axis=2)
+
+
+def split(a, indices_or_sections, axis=0):
+    if type(a) is np.ndarray: # deliberately excluding subclasses
+        return np.split(a, indices_or_sections, axis)
+    else:
+        if not isinstance(indices_or_sections, numbers.Integral):
+            raise Error('splitting by array of indices is not yet implemented')
+        n = indices_or_sections
+        if self.shape[axis] % n != 0:
+            raise ValueError("Array split doesn't result in an equal division")
+        step = self.shape[axis] / n
+        pieces = []
+        start = 0
+        while start < self.shape[axis]:
+            stop = start + step
+            ix = [slice(None)] * self.ndim
+            ix[axis] = slice(start, stop)
+            ix = tuple(ix)
+            pieces.append(self[ix])
+            start += step
+        return pieces
+
+
+def vsplit(a, indices_or_sections):
+    return split(a, indices_or_sections, axis=0)
+
+
+def hsplit(a, indices_or_sections):
+    return split(a, indices_or_sections, axis=1)
+
+
+def dsplit(a, indices_or_sections):
+    return split(a, indices_or_sections, axis=2)

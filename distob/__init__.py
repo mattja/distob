@@ -15,4 +15,5 @@ __version__ = '0.1.3'
 
 if _have_numpy:
     from .arrays import (RemoteArray, DistArray, transpose, rollaxis,
-                         expand_dims, concatenate, vstack, hstack, dstack)
+                         expand_dims, concatenate, vstack, hstack, dstack, 
+                         split, vsplit, hsplit, dsplit)
