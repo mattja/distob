@@ -26,7 +26,7 @@ def _brief_warning(msg, stacklevel=None):
     warnings.formatwarning = old_format
 
 
-@proxy_methods(np.ndarray, include_underscore=(
+@proxy_methods(np.ndarray, exclude=('dtype',), include_underscore=(
     '__getitem__', '__setitem__', '__getslice__', '__setslice__'))
 class RemoteArray(Remote, object):
     """Local object representing a remote ndarray"""
@@ -43,6 +43,7 @@ class RemoteArray(Remote, object):
         # implement the python array interface
         self._array_intf = {'descr': descr, 'shape': shape, 'strides': strides,
                             'typestr': typestr, 'version': 3}
+        self.dtype = np.dtype(typestr)
 
     #If a local consumer wants direct data access via the python 
     #array interface, then ensure a local copy of the data is in memory
@@ -207,7 +208,7 @@ class RemoteArray(Remote, object):
                 msg = (u'Concatenating remote axes with lengths other than 1.'
                         'current implementation will fetch all data locally!')
                 warnings.warn(msg, RuntimeWarning)
-                array = concatenate(distob.gather(rarrays), axis)
+                array = concatenate(gather(rarrays), axis)
                 return distob.scatter(array, axis)
             else:
                 return DistArray(rarrays, axis)
@@ -259,6 +260,7 @@ class DistArray(object):
         strides = list(substrides)
         strides.insert(self._distaxis, int(np.product(subshape)*itemsize))
         strides = tuple(strides)
+        self.dtype = np.dtype(typestr)
         self._subarrays = subarrays
         # a surrogate ndarray to help with slicing of the distributed axis:
         self._placeholders = np.array(range(len(subarrays)), dtype=int)
@@ -681,7 +683,7 @@ class DistArray(object):
         else:
             # Since we have not yet implemented arrays distributed on more than
             # one axis, will fetch subarrays and re-scatter on the new axis.
-            split_self = distob.split(self._ob, self.shape[axis], axis)
+            split_self = split(self._ob, self.shape[axis], axis)
         first = split_self[0]
         others = tuple(split_self[1:]) + tup
         first = scatter(first)
