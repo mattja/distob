@@ -299,7 +299,13 @@ class DistArray(object):
 
     def __repr__(self):
         classname = self.__class__.__name__
-        ix = tuple(np.meshgrid(*(((0, 1, -2, -1),)*self.ndim), indexing='ij'))
+        selectors = []
+        for i in range(self.ndim):
+            if self.shape[i] > 3:
+                selectors.append((0, 1, -2, -1))
+            else:
+                selectors.append(tuple(range(self.shape[i])))
+        ix = tuple(np.meshgrid(*selectors, indexing='ij'))
         corners = gather(self[ix])
         def _repr_nd(corners, shape, indent):
             """Recursively generate abbreviated text representation of array"""
