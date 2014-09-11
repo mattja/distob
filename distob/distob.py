@@ -11,6 +11,8 @@ This module implements the core functionality of distob.
 Functions:
   scatter(obj)  Distribute an object to remote iPython engines, return a proxy.
   gather(obj)  Fetch back a distributed object, making it local again.
+  vectorize(f)  Upgrade normal function f to act in parallel on distributed
+    lists or arrays
   call_all(sequence, methodname, *args, **kwargs) Call method on each element. 
 
 Classes:
@@ -30,6 +32,7 @@ import copy
 import warnings
 import importlib
 import collections
+import numbers
 
 if distob._have_numpy:
     import numpy as np
@@ -676,7 +679,9 @@ def _async_scatter(obj):
     """
     #TODO Instead of special cases for strings and Remote, should have a
     #     list of types that should not be proxied, inc. strings and Remote.
-    if isinstance(obj, Remote) or obj is None:
+    if (isinstance(obj, Remote) or 
+            isinstance(obj, numbers.Number) or 
+            obj is None):
         return obj
     if (isinstance(obj, collections.Sequence) and 
             not isinstance(obj, string_types)):

@@ -2,7 +2,8 @@
 """
 
 from __future__ import absolute_import
-from .distob import proxy_methods, Remote, Ref, Error, scatter, gather
+from .distob import (proxy_methods, Remote, Ref, Error, 
+                     scatter, gather, vectorize)
 import numpy as np
 from collections import Sequence
 import numbers
@@ -209,7 +210,7 @@ class RemoteArray(Remote, object):
                         'current implementation will fetch all data locally!')
                 warnings.warn(msg, RuntimeWarning)
                 array = concatenate(gather(rarrays), axis)
-                return distob.scatter(array, axis)
+                return scatter(array, axis)
             else:
                 return DistArray(rarrays, axis)
 
@@ -592,8 +593,10 @@ class DistArray(object):
         """
         def vf(self, *args, **kwargs):
             refs = [ra._ref for ra in self._subarrays]
-            dv = distob.engine._client[:]
+            from distob import engine
+            dv = engine._client[:]
             def remote_f(object_id, *args, **kwargs):
+                import distob
                 result = f(distob.engine[object_id], *args, **kwargs)
                 if type(result) in distob.engine.proxy_types:
                     return Ref(result)
@@ -610,7 +613,7 @@ class DistArray(object):
                 results[i] = ar.r
                 if isinstance(results[i], Ref):
                     ref = results[i]
-                    RemoteClass = distob.engine.proxy_types[ref.type]
+                    RemoteClass = engine.proxy_types[ref.type]
                     results[i] = RemoteClass(ref)
             if (all(isinstance(r, RemoteArray) for r in results) and
                     all(r.shape == results[0].shape for r in results)):
@@ -628,8 +631,10 @@ class DistArray(object):
                           (np.newaxis,) * newaxes)
                     results = [r[ix] for r in results]
                 return DistArray(results, res_distaxis)
+            elif all(isinstance(r, numbers.Number) for r in results):
+                return np.array(results)
             else:
-                return results
+                return results  # list
         if hasattr(f, '__name__'):
             vf.__name__ = 'v' + f.__name__
             f_str = f.__name__ + '()'
@@ -684,7 +689,7 @@ class DistArray(object):
             return self
         if axis == self._distaxis:
             ix_new_concat_axis = tuple(
-                    ([slice(None)]*(ar.ndim - 1)).insert(axis, np.newaxis))
+                    ([slice(None)]*(self.ndim - 1)).insert(axis, np.newaxis))
             split_self = [ra[ix_new_concat_axis] for ra in ar._subarrays]
         else:
             # Since we have not yet implemented arrays distributed on more than
@@ -694,6 +699,24 @@ class DistArray(object):
         others = tuple(split_self[1:]) + tup
         first = scatter(first)
         return first.concatenate(others, axis)
+
+    def mean(self, axis=None, dtype=None, out=None):
+        """Compute the arithmetic mean along the specified axis."""
+        if axis == self._distaxis:
+            return np.mean(self._ob, axis, dtype, out)
+        elif axis is not None:
+            if out is not None:
+                out[:] = vectorize(np.mean)(self, axis, dtype)
+                return out
+            else:
+                return vectorize(np.mean)(self, axis, dtype)
+        else:
+            if out is not None:
+                out[:] = vectorize(np.mean)(self, axis, dtype).mean()
+                return out
+            else:
+                return vectorize(np.mean)(self, axis, dtype).mean()
+
 
 
 def transpose(a, axes=None):
