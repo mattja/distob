@@ -72,6 +72,8 @@ class RemoteArray(Remote, object):
 
     ndim = property(fget=lambda self: len(self._array_intf['shape']))
 
+    size = property(fget=lambda self: np.prod(self._array_intf['shape']))
+
     @classmethod
     def __pmetadata__(cls, obj):
         # obj is the real ndarray instance that we will control
@@ -296,6 +298,8 @@ class DistArray(object):
 
     shape = property(fget=lambda self: self._array_intf['shape'])
 
+    size = property(fget=lambda self: np.prod(self._array_intf['shape']))
+
     strides = property(fget=lambda self: self._array_intf['strides'])
 
     def __repr__(self):
@@ -348,10 +352,7 @@ class DistArray(object):
 
     nbytes = property(fget=__get_nbytes)
 
-    def __get_ndim(self):
-        return len(self._array_intf['shape'])
-
-    ndim = property(fget=__get_ndim)
+    ndim = property(fget=lambda self: len(self._array_intf['shape']))
 
     def __array_finalize__(self, obj):
         #print('In DistArray __array_finalize__, obj type: ' + str(type(obj)))
