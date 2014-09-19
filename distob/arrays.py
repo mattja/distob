@@ -166,10 +166,7 @@ class RemoteArray(Remote, object):
         for ar in tup:
             if isinstance(ar, DistArray):
                 if axis == ar._distaxis:
-                    ix_new_concat_axis = tuple(
-                        ([slice(None)]*(ar.ndim - 1)).insert(axis, np.newaxis))
-                    arrays.extend(
-                        [ra[ix_new_concat_axis] for ra in ar._subarrays])
+                    arrays.extend(ar._subarrays)
                 else:
                     # Since not yet implemented arrays distributed on more than
                     # one axis, will fetch and re-scatter on the new axis.
@@ -229,11 +226,10 @@ class DistArray(object):
           subarrays (list of RemoteArray, or list of Ref to ndarray): 
             the subarrays (possibly remote) which form the whole array when
             concatenated. The subarrays must all have the same shape and dtype.
-          axis (int, optional): Position of the distributed axis.
-            If n subarrays are given, each of shape (i1, i2, ..., iK), 
-            and `axis` is not given, the resulting DistArray will have shape 
-            (i1, i2, ..., iK, n). But if `axis` is given then the subarrays 
-            will be concatenated along a new axis in position `axis`.
+            Currently must have `a.shape[axis] == 1` for each subarray `a`
+          axis (int, optional): Position of the distributed axis, which is the 
+            axis along which the subarrays will be concatenated. Default is 
+            the last axis.  
         """
         self._n = len(subarrays)  # Length of the distributed axis.
         if self._n < 2:
@@ -249,7 +245,7 @@ class DistArray(object):
         descr, subshape, substrides, typestr = first_ra_metadata
         itemsize = int(typestr[2:])
         if axis is None:
-            self._distaxis = len(subshape)
+            self._distaxis = len(subshape) - 1
         else:
             self._distaxis = axis
         # For numpy strides, `None` means assume C-style ordering:
@@ -257,12 +253,10 @@ class DistArray(object):
             substrides = tuple(int(np.product(
                     subshape[i:])*itemsize) for i in range(1, len(subshape)+1))
         shape = list(subshape)
-        shape.insert(self._distaxis, self._n)
+        shape[self._distaxis] = self._n
         shape = tuple(shape)
-        # Set strides to make the new, distributed axis the `slowest` axis:
-        strides = list(substrides)
-        strides.insert(self._distaxis, int(np.product(subshape)*itemsize))
-        strides = tuple(strides)
+        # For now, report the same strides as used by the subarrays
+        strides = substrides
         self.dtype = np.dtype(typestr)
         self._subarrays = subarrays
         # a surrogate ndarray to help with slicing of the distributed axis:
@@ -275,8 +269,7 @@ class DistArray(object):
         """update local cached copy of the real object"""
         if not self._obcache_current:
             ax = self._distaxis
-            self._obcache = concatenate(
-                    [expand_dims(ra._ob, ax) for ra in self._subarrays], ax)
+            self._obcache = concatenate([ra._ob for ra in self._subarrays], ax)
             self._obcache_current = True
 
     def __ob(self):
@@ -292,6 +285,8 @@ class DistArray(object):
         #print('__array_interface__ requested.')
         self._fetch()
         self._array_intf['data'] = self._obcache.__array_interface__['data']
+        self._array_intf['strides'] = \
+                self._obcache.__array_interface__['strides']
         return self._array_intf
 
     __array_interface__ = property(fget=__get_array_intf)
@@ -412,7 +407,7 @@ class DistArray(object):
         # Apply any np.newaxis
         if _NewaxisType in ix_types:
             new_distaxis = distaxis
-            subix = [slice(None)] * (self.ndim - 1)
+            subix = [slice(None)] * self.ndim
             while _NewaxisType in ix_types:
                 pos = ix_types.index(type(np.newaxis))
                 index = index[:pos] + (slice(None),) + index[(pos+1):]
@@ -430,16 +425,17 @@ class DistArray(object):
         if basic_slicing:
             # separate the index acting on distributed axis from other indices
             distix = index[distaxis]
-            otherix = index[0:distaxis] + index[(distaxis+1):]
             ixlist = self._placeholders[distix]
             if isinstance(ixlist, numbers.Number):
                 # distributed axis has been sliced away: return a RemoteArray
-                return self._subarrays[ixlist][otherix]
+                subix = index[0:distaxis] + (0,) + index[(distaxis+1):]
+                return self._subarrays[ixlist][subix]
             some_subarrays = [self._subarrays[i] for i in ixlist]
-            result_ras = [ra[otherix] for ra in some_subarrays]
+            subix = index[0:distaxis] + (slice(None),) + index[(distaxis+1):]
+            result_ras = [ra[subix] for ra in some_subarrays]
             if len(result_ras) is 1:
                 # no longer distributed: return a RemoteArray
-                return expand_dims(result_ras[0], distaxis)
+                return result_ras[0]
             else:
                 axes_removed = sum(1 for x in index[:distaxis] if isinstance(
                         x, numbers.Integral))
@@ -460,14 +456,15 @@ class DistArray(object):
             idim = index[fancy_pos[0]].ndim # common ndim of all index arrays
             assert(idim > 0)
             distix = index[distaxis]
-            otherix = index[0:distaxis] + index[(distaxis+1):]
+            otherix = index[0:distaxis] + (slice(None),) + index[(distaxis+1):]
             if not is_fancy[distaxis]:
                 # fancy indexing is only being applied to non-distributed axes
                 ixlist = self._placeholders[distix]
                 if isinstance(ixlist, numbers.Number):
-                    ixlist = [ixlist]
+                    # distributed axis was sliced away: return a RemoteArray
+                    subix = index[0:distaxis] + (0,) + index[(distaxis+1):]
+                    return self._subarrays[ixlist][subix]
                 some_subarrays = [self._subarrays[i] for i in ixlist]
-                subix = index[0:distaxis] +(np.newaxis,) + index[(distaxis+1):]
                 # predict where that new axis will be in subarrays post-slicing
                 if contiguous:
                     if fancy_pos[0] > distaxis:
@@ -477,15 +474,13 @@ class DistArray(object):
                 else:
                     earlier_fancy = len([i for i in fancy_pos if i < distaxis])
                     new_distaxis = distaxis - earlier_fancy + idim
-                remove_axis = ((slice(None),)*(new_distaxis) + (0,) + 
-                               (slice(None),)*(self.ndim - new_distaxis - 1))
-                result_ras = [ra[subix][remove_axis] for ra in some_subarrays]
+                result_ras = [ra[otherix] for ra in some_subarrays]
             else:
                 # fancy indexing is being applied to the distributed axis
                 nonconstant_ix_axes = []
                 for j in range(idim):
                     n = distix.shape[j]
-                    if n > 0:
+                    if n > 1:
                         partix = np.split(distix, n, axis=j)
                         if not all(np.array_equal(
                                 partix[0], partix[i]) for i in range(1, n)):
@@ -512,31 +507,20 @@ class DistArray(object):
                     else:
                         new_distaxis = 0 + iax
                     result_ras = []
-                    sub_fancy = list(fancy_pos)
-                    sub_fancy.remove(distaxis)
-                    sub_fancy = [i if i<=distaxis else i-1 for i in sub_fancy]
                     for i in range(distix.shape[iax]):
-                        # Slice the original indexing arrays into arrays of one
-                        # less dimension, suitable for indexing our subarrays.
+                        # Slice the original indexing arrays into smaller
+                        # arrays, suitable for indexing our subarrays.
                         sl = [slice(None)] * idim
-                        sl[iax] = i
+                        sl[iax] = slice(i, i+1)
                         sl = tuple(sl)
-                        subix = list(otherix)
+                        subix = list(index)
                         for j in range(len(subix)):
                             if isinstance(subix[j], np.ndarray):
                                 subix[j] = subix[j][sl]
+                                if j == distaxis:
+                                    subix[j] = np.zeros_like(subix[j])
                         subix = tuple(subix)
-                        ra = some_subarrays[i][subix]
-                        # If operation on the subarray was contiguous, but the
-                        # operation on the whole DistArray is not, then need to
-                        # manually move all fancy output axes to the start.
-                        sub_contiguous = (len(sub_fancy) is 0 or
-                            (sub_fancy[-1] - sub_fancy[0] == len(sub_fancy)-1))
-                        if sub_contiguous and not contiguous:
-                            sub_neworder = (sub_fancy + [k for k in range(
-                                    ra.ndim) if k not in sub_fancy])
-                            ra = transpose(ra, sub_neworder)
-                        result_ras.append(ra)
+                        result_ras.append(some_subarrays[i][subix])
                     if all_same_engine and len(result_ras) > 1:
                         rs = [expand_dims(r, new_distaxis) for r in result_ras]
                         return concatenate(rs, new_distaxis) # one RemoteArray
@@ -549,7 +533,7 @@ class DistArray(object):
                     return self._ob[index]
             if len(result_ras) is 1:
                 # no longer distributed: return a RemoteArray
-                return expand_dims(result_ras[0], new_distaxis)
+                return result_ras[0]
             else:
                 return DistArray(result_ras, new_distaxis)
 
@@ -593,7 +577,9 @@ class DistArray(object):
             subarray).
         """
         def vf(self, *args, **kwargs):
-            refs = [ra._ref for ra in self._subarrays]
+            remove_axis = ((slice(None),)*(self._distaxis) + (0,) + 
+                           (slice(None),)*(self.ndim - self._distaxis - 1))
+            refs = [ra[remove_axis]._ref for ra in self._subarrays]
             from distob import engine
             dv = engine._client[:]
             def remote_f(object_id, *args, **kwargs):
@@ -619,19 +605,23 @@ class DistArray(object):
             if (all(isinstance(r, RemoteArray) for r in results) and
                     all(r.shape == results[0].shape for r in results)):
                 # Then we can join the results and return a DistArray.
-                # We will keep the same axis distributed as in the input,
-                # unless the results have more dimensions than the input.
-                res_subshape = results[0].shape
-                if len(res_subshape) > self.ndim - 1:
-                    res_distaxis = len(res_subshape)
-                else:
-                    res_distaxis = self._distaxis
-                newaxes = res_distaxis - len(res_subshape)
-                if newaxes >= 1:
-                    ix = ((slice(None),) * len(res_subshape) + 
-                          (np.newaxis,) * newaxes)
-                    results = [r[ix] for r in results]
-                return DistArray(results, res_distaxis)
+                # To position result distaxis, match input shape where possible
+                old_subshape = (self.shape[0:self._distaxis] +
+                                self.shape[(self._distaxis+1):])
+                res_subshape = list(results[0].shape)
+                pos = len(res_subshape)
+                for i in range(len(old_subshape)):
+                    n = old_subshape[i]
+                    if n not in res_subshape:
+                        continue
+                    pos = res_subshape.index(n)
+                    res_subshape[pos] = None
+                    if i >= self._distaxis:
+                        break
+                    pos += 1
+                new_distaxis = pos
+                results = [r.expand_dims(new_distaxis) for r in results]
+                return DistArray(results, new_distaxis)
             elif all(isinstance(r, numbers.Number) for r in results):
                 return np.array(results)
             else:
@@ -689,9 +679,7 @@ class DistArray(object):
         if tup is (None,) or len(tup) is 0:
             return self
         if axis == self._distaxis:
-            ix_new_concat_axis = tuple(
-                    ([slice(None)]*(self.ndim - 1)).insert(axis, np.newaxis))
-            split_self = [ra[ix_new_concat_axis] for ra in ar._subarrays]
+            split_self = self._subarrays
         else:
             # Since we have not yet implemented arrays distributed on more than
             # one axis, will fetch subarrays and re-scatter on the new axis.
@@ -703,21 +691,22 @@ class DistArray(object):
 
     def mean(self, axis=None, dtype=None, out=None):
         """Compute the arithmetic mean along the specified axis."""
-        if axis == self._distaxis:
+        if axis is None:
+            if out is not None:
+                out[:] = vectorize(np.mean)(self, None, dtype).mean()
+                return out
+            else:
+                return vectorize(np.mean)(self, None, dtype).mean()
+        elif axis == self._distaxis:
             return np.mean(self._ob, axis, dtype, out)
-        elif axis is not None:
+        else:
+            if axis > self._distaxis:
+                axis -= 1
             if out is not None:
                 out[:] = vectorize(np.mean)(self, axis, dtype)
                 return out
             else:
                 return vectorize(np.mean)(self, axis, dtype)
-        else:
-            if out is not None:
-                out[:] = vectorize(np.mean)(self, axis, dtype).mean()
-                return out
-            else:
-                return vectorize(np.mean)(self, axis, dtype).mean()
-
 
 
 def transpose(a, axes=None):
@@ -749,10 +738,8 @@ def transpose(a, axes=None):
             raise ValueError("axes don't match array")
         distaxis = a._distaxis
         new_distaxis = axes.index(distaxis)
-        axes.remove(distaxis)
-        subaxes = tuple((i if i < distaxis else i - 1) for i in axes)
-        new_subarrays = [ra.transpose(*subaxes) for ra in a._subarrays]
-        return DistArray([ra._ref for ra in new_subarrays], new_distaxis)
+        new_subarrays = [ra.transpose(*axes) for ra in a._subarrays]
+        return DistArray(new_subarrays, new_distaxis)
     else:
         return np.transpose(a, axes)
 
@@ -934,3 +921,36 @@ def hsplit(a, indices_or_sections):
 
 def dsplit(a, indices_or_sections):
     return split(a, indices_or_sections, axis=2)
+
+
+def broadcast_arrays(*args):
+    if all(type(a) is np.ndarray for a in args): # exclude subclasses
+        return np.broadcast_arrays(*args)
+    shapes = [a.shape for a in args]
+    ndim = max(len(sh) for sh in shapes) # new common ndim after broadcasting
+    arrays = list(args)
+    for i in range(len(arrays)):
+        old_ndim = len(shapes[i])
+        if old_ndim < ndim:
+            ix = (np.newaxis,)*(ndim - old_ndim) + (slice(None),)*old_ndim
+            arrays[i] = arrays[i][ix]
+            shapes[i] = arrays[i].shape
+    newshape = tuple(max(sh[ax] for sh in shapes) for ax in range(ndim))
+    # Now broadcast arrays using fancy indexing. This is wasteful of both
+    # memory and CPU, as it actually creates the redundant arrays instead of
+    # making views with zero stride, but it works universally on classes that
+    # implement fancy indexing. (TODO: Broadcast efficiently by having each
+    # class implement its own `broaden(newshape)` method that returns views)
+    for i in range(len(arrays)):
+        for ax in range(ndim):
+            if shapes[i][ax] == newshape[ax]:
+                pass
+            elif shapes[i][ax] == 1:
+                ix = ((slice(None),) * ax + 
+                      (np.zeros(newshape[ax], dtype=np.int64),) + 
+                      (slice(None),) * (ndim - ax - 1))
+                arrays[i] = arrays[i][ix]
+            else:
+                raise ValueError(u'shape mismatch: two or more arrays have '
+                                  'incompatible dimensions on axis %d' % ax)
+    return arrays

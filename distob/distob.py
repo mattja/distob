@@ -455,6 +455,8 @@ class Remote(object):
 
     def _apply(self, method_name, *args, **kwargs):
         """Call a method on the remote object without caching."""
+        #print('in _apply: type=%s, method_name==%s, args==%s, kwargs==%s' % (
+        #        type(self), method_name, args, kwargs))
         def remote_call_method(object_id, method_name, *args, **kwargs):
             obj = distob.engine[object_id]
             result = obj.__getattribute__(method_name)(*args, **kwargs)
@@ -736,14 +738,20 @@ def _ars_to_proxies(ars):
         raise DistobTypeError('Unpacking ars: unexpected type %s' % type(ars))
 
 
-def _scatter_ndarray(ar, axis=None):
+def _scatter_ndarray(ar, axis=-1):
     """Turn a numpy ndarray into a distributed array"""
     from .arrays import DistArray, RemoteArray
     shape = ar.shape
     ndim = len(shape)
     if axis is None:
-        axis = ndim - 1
+        return scatter([ar])[0]
+    if axis < -ndim or axis > ndim - 1:
+        raise DistobValueError('axis out of range')
+    if axis < 0:
+        axis = ndim + axis
     n = shape[axis]
+    if n == 1:
+        return scatter([ar])[0]
     if distob.engine is None:
         _setup_engines()
     num_engines = len(distob.engine._client)
@@ -752,8 +760,6 @@ def _scatter_ndarray(ar, axis=None):
                     'chunks of length 1. axis %d is long (%d), so may be slow '
                     'distributing the array along this axis.' % (axis, n))
         warnings.warn(message, RuntimeWarning)
-    if n is 1:
-        return scatter([ar])[0]
     if isinstance(ar, DistArray):
         if axis == ar._distaxis:
             return ar
@@ -766,26 +772,26 @@ def _scatter_ndarray(ar, axis=None):
     s = slice(None)
     subarrays = []
     for i in range(n):
-        index = (s,)*axis + (i,) + (s,)*(ndim - axis - 1)
+        index = (s,)*axis + (slice(i,i+1),) + (s,)*(ndim - axis - 1)
         subarrays.append(ar[index])
     subarrays = scatter(subarrays)
     return DistArray(subarrays, axis)
 
 
-def scatter(obj, axis=None):
+def scatter(obj, axis=-1):
     """Distribute obj or list to remote engines, returning proxy objects
     Args:
       obj: any python object, or list of objects
       axis (int, optional): currently only used if scattering a numpy array,
-        specifying along which axis to split the array to distribute it. 
-        If None, the default is to split along the last axis.
+        specifying along which axis to split the array to distribute it. The 
+        default is to split along the last axis.
     """
     if hasattr(obj, '__distob_scatter__'):
         return obj.__distob_scatter__(axis)
     if distob._have_numpy and (isinstance(obj, np.ndarray) or
                         hasattr(type(obj), '__array_interface__')):
         return _scatter_ndarray(obj, axis)
-    if axis is not None:
+    if axis is not -1:
         raise DistobValueError('`axis` argument only applies to ndarrays')
     elif isinstance(obj, Remote):
         return obj
@@ -844,14 +850,18 @@ def vectorize(f):
             inputs = scatter(obj)
             dv = distob.engine._client[:]
             results = []
-            for ref in refs:
-                dv.targets = ref.engine_id
-                ar = dv.apply_async(remote_f, ref.object_id, *args, **kwargs)
-                results.append(ar)
+            for obj in inputs:
+                if isinstance(obj, Remote):
+                    dv.targets = obj._ref.engine_id
+                    results.append(dv.apply_async(remote_f, obj._ref.object_id,
+                                                  *args, **kwargs))
+                else:
+                    results.append(f(obj, *args, **kwargs))
             for i in range(len(results)):
                 ar = results[i]
-                ar.wait()
-                results[i] = ar.r
+                if isinstance(ar, parallel.AsyncResult):
+                    ar.wait()
+                    results[i] = ar.r
                 if isinstance(results[i], Ref):
                     ref = results[i]
                     RemoteClass = distob.engine.proxy_types[ref.type]

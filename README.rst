@@ -43,7 +43,7 @@ distributed numpy arrays
 
 | ``scatter(a, axis=2)`` Distribute a single numpy array along axis 2, returning a DistArray.
 | 
-| ``concatenate``, ``vstack``, ``hstack``, ``dstack``, ``expand_dims``, ``transpose``, ``rollaxis``, ``split``, ``vsplit``, ``hsplit``, ``dsplit``:
+| ``concatenate``, ``vstack``, ``hstack``, ``dstack``, ``expand_dims``, ``transpose``, ``rollaxis``, ``split``, ``vsplit``, ``hsplit``, ``dsplit``, ``broadcast_arrays``:
 | These work like the numpy functions of the same name. But these can be used with a mix of ordinary ndarrays, RemoteArrays and DistArrays, performing array structural changes while keeping the actual data distributed across multiple engines.
 | For example, stacking several RemoteArrays gives a DistArray, without needing to move data.
 | 
