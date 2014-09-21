@@ -14,16 +14,15 @@ running on a single computer or on a cluster.
 In place of the original objects, proxy objects are kept on the client
 computer that provide the same interface as the original objects. You
 can continue to use these as if the objects were still local. All
-methods are passed through to the remote objects, where computation is
-done.
+methods are passed through to the remote objects, where computation is done.
 
-In particular, sending numpy arrays to the cluster is supported. (Will
-require numpy 1.9.0b1 or later for full functionality with remote
-ufuncs)
+In particular, sending numpy arrays to the cluster is supported. 
 
 A numpy array can also be scattered across the cluster, along a particular
-axis. Operations on the array can then automatically be split up and done
-in parallel (using ``vectorize()`` below)
+axis. Operations on the array can then be automatically done in parallel 
+(either using ufuncs, or by using ``vectorize()`` below)
+
+Note: numpy 1.10.0 or later (not yet released!) is required for full functionality with distributed array arithmetic and ufuncs. You can get a development snapshot of numpy here: https://github.com/numpy/numpy/archive/master.zip
 
 Distob is an object layer built on top of IPython.parallel, so it will
 make use of your default IPython parallel profile. This allows different
@@ -37,11 +36,14 @@ functions
 |
 | ``vectorize(f)`` Turn an ordinary function (that takes a single object or array) into one that acts in parallel on a scattered list or array. ``apply(f, obj)`` is the same as ``vectorize(f)(obj)``
 
-
 distributed numpy arrays
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 | ``scatter(a, axis=2)`` Distribute a single numpy array along axis 2, returning a DistArray.
+| 
+| Arithmetic operations can freely mix ordinary arrays with the new array types.
+| Normal numpy ufuncs can also be used on the distributed arrays.
+| Arithmetic and ufunc computations will automatically be routed to an engine, or executed in parallel on several engines, depending on where the data is. (needs numpy>=1.10.0)
 | 
 | ``concatenate``, ``vstack``, ``hstack``, ``dstack``, ``expand_dims``, ``transpose``, ``rollaxis``, ``split``, ``vsplit``, ``hsplit``, ``dsplit``, ``broadcast_arrays``:
 | These work like the numpy functions of the same name. But these can be used with a mix of ordinary ndarrays, RemoteArrays and DistArrays, performing array structural changes while keeping the actual data distributed across multiple engines.
@@ -72,18 +74,17 @@ TODO
 
 -  Blocking/non-blocking proxy methods
 
--  Assigning to slices of remote arrays
+-  Allow assignment to slices of remote arrays
 
--  Finish implementing remote ufunc support for arrays, with computation routed according to operand location.
+-  Implement caching of remote array slice operations
 
--  Auto-creation of proxy classes at runtime (depends
-   uqfoundation/dill#58)
+-  Auto-creation of proxy classes at runtime (depends uqfoundation/dill#58)
 
--  Use caching only if specified for a particular method (initially
-   read-only methods)
+-  Instead of caching all methods, allow specifying which ones.
 
--  Make proxy classes more robust, adapting ``wrapt``
-   (pypi.python.org/pypi/wrapt)
+-  For ufunc execution, still need to implement ``reduce``, ``accumulate``, ``reduceat``, ``outer``, ``at`` methods.
+
+-  Make proxy classes more robust, adapting ``wrapt`` (pypi.python.org/pypi/wrapt)
 
 Thanks
 ------

@@ -3,19 +3,25 @@
 
 from __future__ import absolute_import
 from .distob import (proxy_methods, Remote, Ref, Error, 
-                     scatter, gather, vectorize)
+                     scatter, gather, _directed_scatter, vectorize)
 import numpy as np
 from collections import Sequence
 import numbers
 import types
 import warnings
 import copy
+import sys
 
 # types for compatibility across python 2 and 3
 _SliceType = type(slice(None))
 _EllipsisType = type(Ellipsis)
 _TupleType = type(())
 _NewaxisType = type(np.newaxis)
+
+try:
+    string_types = basestring
+except NameError:
+    string_types = str
 
 
 def _brief_warning(msg, stacklevel=None):
@@ -45,6 +51,7 @@ class RemoteArray(Remote, object):
         self._array_intf = {'descr': descr, 'shape': shape, 'strides': strides,
                             'typestr': typestr, 'version': 3}
         self.dtype = np.dtype(typestr)
+        self.__engine_affinity__ = (self._ref.engine_id, self.nbytes)
 
     #If a local consumer wants direct data access via the python 
     #array interface, then ensure a local copy of the data is in memory
@@ -70,9 +77,14 @@ class RemoteArray(Remote, object):
 
     strides = property(fget=lambda self: self._array_intf['strides'])
 
-    ndim = property(fget=lambda self: len(self._array_intf['shape']))
-
     size = property(fget=lambda self: np.prod(self._array_intf['shape']))
+
+    itemsize = property(fget=lambda self: int(self._array_intf['typestr'][2:]))
+
+    nbytes = property(fget=lambda self: (np.prod(self._array_intf['shape']) *
+                                         int(self._array_intf['typestr'][2:])))
+
+    ndim = property(fget=lambda self: len(self._array_intf['shape']))
 
     @classmethod
     def __pmetadata__(cls, obj):
@@ -88,47 +100,35 @@ class RemoteArray(Remote, object):
     def __len__(self):
         return self._array_intf['shape'][0]
 
-    def __get_nbytes(self):
-        if self._obcache is not None:
-            return self._obcache.nbytes
-        else:
-            return 0
-
-    nbytes = property(fget=__get_nbytes)
-
     def __array_finalize__(self, obj):
         #print('In proxy __array_finalize__, obj is type ' + str(type(obj)))
         if obj is None:
             return
 
     def __numpy_ufunc__(self, ufunc, method, i, inputs, **kwargs):
-        """Route ufunc execution intelligently to local host or remote engine 
-        depending on where the arguments reside.
-        """
-        print('In RemoteArray __numpy_ufunc__')
-        print('ufunc:%s; method:%s; selfpos:%d' % (repr(ufunc), method, i))
-        print('inputs:%s; kwargs:%s' % (inputs, kwargs))
+        return _ufunc_dispatch(ufunc, method, i, inputs, **kwargs)
 
-        raise Error("ufunc=%s Haven't implemented ufunc support yet!" % ufunc)
-        # TODO implement this!
-        #return getattr(ufunc, method)(*inputs, **kwargs)
-
-    def __array_prepare__(self, in_arr, context=None):
+    def __array_prepare__(self, out_arr, context=None):
         """Fetch underlying data to user's computer and apply ufunc locally.
-        Only used as a fallback, for numpy versions < 1.9 which lack 
+        Only used as a fallback, for numpy versions < 1.10 which lack 
         support for the __numpy_ufunc__ mechanism. 
         """
-        print('In proxy __array_prepare__')
-        #TODO fetch data here
-        if map(int, np.version.short_version.split('.')) < [1,9,0]:
-            raise Error('Numpy version 1.9.0 or later is required!')
+        #print('In RemoteArray __array_prepare__. context=%s' % repr(context))
+        if map(int, np.version.short_version.split('.')) < [1,10,0]:
+            msg = (u'Warning: Distob distributed array arithmetic and ufunc ' +
+                    'support requires numpy 1.10.0 or later (not yet ' +
+                    'released!) \nCan get the latest numpy here: ' +
+                    'https://github.com/numpy/numpy/archive/master.zip\n' +
+                    'In the meantime, will bring data back to the client to ' +
+                    'perform the requested operation...')
+            _brief_warning(msg, stacklevel=3)
+            return out_arr
         else:
-            raise Error('Numpy is current, but still called __array_prepare__')
-        #return super(RemoteArray, self).__array_prepare__(in_arr, context)
+            raise Error('Have numpy >=1.10 but still called __array_prepare__')
 
     def __array_wrap__(self, out_arr, context=None):
-        print('In __array_wrap__')
-        return np.ndarray.__array_wrap__(out_arr, context)
+        #print('In RemoteArray __array_wrap__')
+        return out_arr
 
     def expand_dims(self, axis):
         """Insert a new axis, at a given position in the array shape
@@ -176,7 +176,7 @@ class RemoteArray(Remote, object):
                 arrays.append(ar)
             elif isinstance(ar, Remote):
                 arrays.append(_remote_to_array(ar))
-            elif (not isinstance(ar, Remote) and 
+            elif (not isinstance(ar, Remote) and
                     not isinstance(ar, DistArray) and
                     not hasattr(type(ar), '__array_interface__')):
                 arrays.append(np.array(ar))
@@ -212,6 +212,200 @@ class RemoteArray(Remote, object):
                 return scatter(array, axis)
             else:
                 return DistArray(rarrays, axis)
+
+    # The following operations will be intercepted by __numpy_ufunc__()
+
+    def __add__(self, other):
+        """x.__add__(y) <==> x+y"""
+        return np.add(self, other)
+
+    def __radd__(self, other):
+        """x.__radd__(y) <==> y+x"""
+        return np.add(other, self)
+
+    def __sub__(self, other):
+        """x.__sub__(y) <==> x-y"""
+        return np.subtract(self, other)
+
+    def __rsub__(self, other):
+        """x.__rsub__(y) <==> y-x"""
+        return np.subtract(other, self)
+
+    def __mul__(self, other):
+        """x.__mul__(y) <==> x*y"""
+        return np.multiply(self, other)
+
+    def __rmul__(self, other):
+        """x.__rmul__(y) <==> y*x"""
+        return np.multiply(other, self)
+
+    def __floordiv__(self, other):
+        """x.__floordiv__(y) <==> x//y"""
+        return np.floor_divide(self, other)
+
+    def __rfloordiv__(self, other):
+        """x.__rfloordiv__(y) <==> y//x"""
+        return np.floor_divide(other, self)
+
+    def __mod__(self, other):
+        """x.__mod__(y) <==> x%y"""
+        return np.mod(self, other)
+
+    def __rmod__(self, other):
+        """x.__rmod__(y) <==> y%x"""
+        return np.mod(other, self)
+
+    def __divmod__(self, other):
+        """x.__divmod__(y) <==> divmod(x, y)"""
+        return (np.floor_divide(self - self % other, other), self % other)
+
+    def __rdivmod__(self, other):
+        """x.__rdivmod__(y) <==> divmod(y, x)"""
+        return (np.floor_divide(other - other % self, self), other % self)
+
+    def __pow__(self, other, modulo=None):
+        """x.__pow__(y[, z]) <==> pow(x, y[, z])"""
+        # Deliberately match numpy behaviour of ignoring `modulo`
+        return np.power(self, other)
+
+    def __rpow__(self, other, modulo=None):
+        """y.__rpow__(x[, z]) <==> pow(x, y[, z])"""
+        # Deliberately match numpy behaviour of ignoring `modulo`
+        return np.power(other, self)
+
+    def __lshift__(self, other):
+        """x.__lshift__(y) <==> x<<y"""
+        return np.left_shift(self, other)
+
+    def __rlshift__(self, other):
+        """x.__lshift__(y) <==> y<<x"""
+        return np.left_shift(other, self)
+
+    def __rshift__(self, other):
+        """x.__rshift__(y) <==> x>>y"""
+        return np.right_shift(self, other)
+
+    def __rrshift__(self, other):
+        """x.__rshift__(y) <==> y>>x"""
+        return np.right_shift(other, self)
+
+    def __and__(self, other):
+        """x.__and__(y) <==> x&y"""
+        return np.bitwise_and(self, other)
+
+    def __rand__(self, other):
+        """x.__rand__(y) <==> y&x"""
+        return np.bitwise_and(other, self)
+
+    def __xor__(self, other):
+        """x.__xor__(y) <==> x^y"""
+        return np.bitwise_xor(self, other)
+
+    def __rxor__(self, other):
+        """x.__rxor__(y) <==> y^x"""
+        return np.bitwise_xor(other, self)
+
+    def __or__(self, other):
+        """x.__or__(y) <==> x|y"""
+        return np.bitwise_or(self, other)
+
+    def __ror__(self, other):
+        """x.__ror__(y) <==> y|x"""
+        return np.bitwise_or(other, self)
+
+    def __div__(self, other):
+        """x.__div__(y) <==> x/y"""
+        return np.divide(self, other)
+
+    def __rdiv__(self, other):
+        """x.__rdiv__(y) <==> y/x"""
+        return np.divide(other, self)
+
+    def __truediv__(self, other):
+        """x.__truediv__(y) <==> x/y"""
+        return np.true_divide(self, other)
+
+    def __rtruediv__(self, other):
+        """x.__rtruediv__(y) <==> y/x"""
+        return np.true_divide(other, self)
+
+# in-place operators __iadd__, __imult__ etc are not yet implemented.
+# To do so will first need to implement the ufunc out= argument and update the
+# location selection rules accordingly to take output location into account.
+# Will also want to set self._obcache_current = False before ufunc execution.
+
+    def __iadd__(self, other):
+        """x.__add__(y) <==> x+=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __isub__(self, other):
+        """x.__sub__(y) <==> x-=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __imul__(self, other):
+        """x.__mul__(y) <==> x*=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __ifloordiv__(self, other):
+        """x.__floordiv__(y) <==> x//=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __imod__(self, other):
+        """x.__mod__(y) <==> x%=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __ipow__(self, other, modulo=None):
+        """x.__pow__(y) <==> x**=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __ilshift__(self, other):
+        """x.__lshift__(y) <==> x<<=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __irshift__(self, other):
+        """x.__rshift__(y) <==> x>>=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __iand__(self, other):
+        """x.__and__(y) <==> x&=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __ixor__(self, other):
+        """x.__xor__(y) <==> x^=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __ior__(self, other):
+        """x.__or__(y) <==> x|=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __idiv__(self, other):
+        """x.__div__(y) <==> x/=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __itruediv__(self, other):
+        """x.__truediv__(y) <==> x/=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __neg__(self):
+        """x.__neg__() <==> -x"""
+        return np.negative(self)
+
+    def __pos__(self):
+        """x.__pos__() <==> +x"""
+        return self
+
+    def __abs__(self):
+        """x.__abs__() <==> abs(x)"""
+        return np.abs(self)
+
+    def __invert__(self):
+        """x.__invert__() <==> ~x"""
+        return np.invert(self)
+
+    def dot(self, other):
+        """Dot product of two arrays.
+        Refer to `numpy.dot` for full documentation."""
+        return np.dot(self, other)
 
 
 class DistArray(object):
@@ -264,13 +458,18 @@ class DistArray(object):
         # implement the python array interface
         self._array_intf = {'descr': descr, 'shape': shape, 'strides': strides,
                             'typestr': typestr, 'version': 3}
+        location = ([ra._ref.engine_id for ra in subarrays], self._distaxis)
+        self.__engine_affinity__ = (location, np.prod(shape)*itemsize)
 
     def _fetch(self):
         """update local cached copy of the real object"""
         if not self._obcache_current:
+            from distob import engine
             ax = self._distaxis
             self._obcache = concatenate([ra._ob for ra in self._subarrays], ax)
             self._obcache_current = True
+            # now prefer local processing:
+            self.__engine_affinity__ = (engine.id, self.__engine_affinity__[1])
 
     def __ob(self):
         """return a copy of the real object"""
@@ -279,7 +478,7 @@ class DistArray(object):
 
     _ob = property(fget=__ob)
 
-    #If a local consumer asks for direct data access via the python 
+    #If a local consumer asks for direct data access via the python
     #array interface, attempt to put a local copy of all the data into memory
     def __get_array_intf(self):
         #print('__array_interface__ requested.')
@@ -293,9 +492,16 @@ class DistArray(object):
 
     shape = property(fget=lambda self: self._array_intf['shape'])
 
+    strides = property(fget=lambda self: self._array_intf['strides'])
+
     size = property(fget=lambda self: np.prod(self._array_intf['shape']))
 
-    strides = property(fget=lambda self: self._array_intf['strides'])
+    itemsize = property(fget=lambda self: int(self._array_intf['typestr'][2:]))
+
+    nbytes = property(fget=lambda self: (np.prod(self._array_intf['shape']) *
+                                         int(self._array_intf['typestr'][2:])))
+
+    ndim = property(fget=lambda self: len(self._array_intf['shape']))
 
     def __repr__(self):
         classname = self.__class__.__name__
@@ -355,29 +561,29 @@ class DistArray(object):
             return
 
     def __numpy_ufunc__(self, ufunc, method, i, inputs, **kwargs):
-        """Route ufunc execution intelligently to local host or remote engine 
-        depending on where the arguments reside.
-        """
-        print('In DistArray __numpy_ufunc__')
-        print('ufunc:%s; method:%s; selfpos:%d' % (repr(ufunc), method, i))
-        print('inputs:%s; kwargs:%s' % (inputs, kwargs))
-        raise Error("ufunc=%s Haven't implemented ufunc support yet!" % ufunc)
+        return _ufunc_dispatch(ufunc, method, i, inputs, **kwargs)
 
-    def __array_prepare__(self, in_arr, context=None):
+    def __array_prepare__(self, out_arr, context=None):
         """Fetch underlying data to user's computer and apply ufunc locally.
-        Only used as a fallback, for numpy versions < 1.9 which lack 
+        Only used as a fallback, for numpy versions < 1.10 which lack 
         support for the __numpy_ufunc__ mechanism. 
         """
-        print('In DistArray __array_prepare__')
-        #TODO fetch data here
-        if map(int, np.version.short_version.split('.')) < [1,9,0]:
-            raise Error('Numpy version 1.9.0 or later is required.')
+        #print('In DistArray __array_prepare__. context=%s' % repr(context))
+        if map(int, np.version.short_version.split('.')) < [1,10,0]:
+            msg = (u'Warning: Distob distributed array arithmetic and ufunc ' +
+                   u'support requires numpy 1.10.0 or later (not yet ' +
+                   u'released!) Can get the latest snapshot here: ' +
+                   u'https://github.com/numpy/numpy/archive/master.zip\n' +
+                   u'In the meantime, will bring data back to the client to ' +
+                   u'perform the requested operation...')
+            _brief_warning(msg, stacklevel=3)
         else:
-            raise Error('Numpy is current, but still called __array_prepare__')
+            raise Error('Have numpy >=1.10 but still called __array_prepare__')
+        return out_arr
 
     def __array_wrap__(self, out_arr, context=None):
-        print('In DistArray __array_wrap__')
-        return np.ndarray.__array_wrap__(out_arr, context)
+        #print('In DistArray __array_wrap__')
+        return out_arr
 
     def __getitem__(self, index):
         """Slice the distributed array"""
@@ -577,7 +783,7 @@ class DistArray(object):
             subarray).
         """
         def vf(self, *args, **kwargs):
-            remove_axis = ((slice(None),)*(self._distaxis) + (0,) + 
+            remove_axis = ((slice(None),)*(self._distaxis) + (0,) +
                            (slice(None),)*(self.ndim - self._distaxis - 1))
             refs = [ra[remove_axis]._ref for ra in self._subarrays]
             from distob import engine
@@ -707,6 +913,416 @@ class DistArray(object):
                 return out
             else:
                 return vectorize(np.mean)(self, axis, dtype)
+
+    # The following operations will be intercepted by __numpy_ufunc__()
+
+    def __add__(self, other):
+        """x.__add__(y) <==> x+y"""
+        return np.add(self, other)
+
+    def __radd__(self, other):
+        """x.__radd__(y) <==> y+x"""
+        return np.add(other, self)
+
+    def __sub__(self, other):
+        """x.__sub__(y) <==> x-y"""
+        return np.subtract(self, other)
+
+    def __rsub__(self, other):
+        """x.__rsub__(y) <==> y-x"""
+        return np.subtract(other, self)
+
+    def __mul__(self, other):
+        """x.__mul__(y) <==> x*y"""
+        return np.multiply(self, other)
+
+    def __rmul__(self, other):
+        """x.__rmul__(y) <==> y*x"""
+        return np.multiply(other, self)
+
+    def __floordiv__(self, other):
+        """x.__floordiv__(y) <==> x//y"""
+        return np.floor_divide(self, other)
+
+    def __rfloordiv__(self, other):
+        """x.__rfloordiv__(y) <==> y//x"""
+        return np.floor_divide(other, self)
+
+    def __mod__(self, other):
+        """x.__mod__(y) <==> x%y"""
+        return np.mod(self, other)
+
+    def __rmod__(self, other):
+        """x.__rmod__(y) <==> y%x"""
+        return np.mod(other, self)
+
+    def __divmod__(self, other):
+        """x.__divmod__(y) <==> divmod(x, y)"""
+        return (np.floor_divide(self - self % other, other), self % other)
+
+    def __rdivmod__(self, other):
+        """x.__rdivmod__(y) <==> divmod(y, x)"""
+        return (np.floor_divide(other - other % self, self), other % self)
+
+    def __pow__(self, other, modulo=None):
+        """x.__pow__(y[, z]) <==> pow(x, y[, z])"""
+        # Deliberately match numpy behaviour of ignoring `modulo`
+        return np.power(self, other)
+
+    def __rpow__(self, other, modulo=None):
+        """y.__rpow__(x[, z]) <==> pow(x, y[, z])"""
+        # Deliberately match numpy behaviour of ignoring `modulo`
+        return np.power(other, self)
+
+    def __lshift__(self, other):
+        """x.__lshift__(y) <==> x<<y"""
+        return np.left_shift(self, other)
+
+    def __rlshift__(self, other):
+        """x.__lshift__(y) <==> y<<x"""
+        return np.left_shift(other, self)
+
+    def __rshift__(self, other):
+        """x.__rshift__(y) <==> x>>y"""
+        return np.right_shift(self, other)
+
+    def __rrshift__(self, other):
+        """x.__rshift__(y) <==> y>>x"""
+        return np.right_shift(other, self)
+
+    def __and__(self, other):
+        """x.__and__(y) <==> x&y"""
+        return np.bitwise_and(self, other)
+
+    def __rand__(self, other):
+        """x.__rand__(y) <==> y&x"""
+        return np.bitwise_and(other, self)
+
+    def __xor__(self, other):
+        """x.__xor__(y) <==> x^y"""
+        return np.bitwise_xor(self, other)
+
+    def __rxor__(self, other):
+        """x.__rxor__(y) <==> y^x"""
+        return np.bitwise_xor(other, self)
+
+    def __or__(self, other):
+        """x.__or__(y) <==> x|y"""
+        return np.bitwise_or(self, other)
+
+    def __ror__(self, other):
+        """x.__ror__(y) <==> y|x"""
+        return np.bitwise_or(other, self)
+
+    def __div__(self, other):
+        """x.__div__(y) <==> x/y"""
+        return np.divide(self, other)
+
+    def __rdiv__(self, other):
+        """x.__rdiv__(y) <==> y/x"""
+        return np.divide(other, self)
+
+    def __truediv__(self, other):
+        """x.__truediv__(y) <==> x/y"""
+        return np.true_divide(self, other)
+
+    def __rtruediv__(self, other):
+        """x.__rtruediv__(y) <==> y/x"""
+        return np.true_divide(other, self)
+
+# in-place operators __iadd__, __imult__ etc are not yet implemented.
+# To do so will first need to implement the ufunc out= argument and update the
+# location selection rules accordingly to take output location into account.
+# Will also want to set self._obcache_current = False before ufunc execution.
+
+    def __iadd__(self, other):
+        """x.__add__(y) <==> x+=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __isub__(self, other):
+        """x.__sub__(y) <==> x-=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __imul__(self, other):
+        """x.__mul__(y) <==> x*=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __ifloordiv__(self, other):
+        """x.__floordiv__(y) <==> x//=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __imod__(self, other):
+        """x.__mod__(y) <==> x%=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __ipow__(self, other, modulo=None):
+        """x.__pow__(y) <==> x**=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __ilshift__(self, other):
+        """x.__lshift__(y) <==> x<<=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __irshift__(self, other):
+        """x.__rshift__(y) <==> x>>=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __iand__(self, other):
+        """x.__and__(y) <==> x&=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __ixor__(self, other):
+        """x.__xor__(y) <==> x^=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __ior__(self, other):
+        """x.__or__(y) <==> x|=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __idiv__(self, other):
+        """x.__div__(y) <==> x/=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __itruediv__(self, other):
+        """x.__truediv__(y) <==> x/=y"""
+        raise Error('distributed in-place operators not yet implemented')
+
+    def __neg__(self):
+        """x.__neg__() <==> -x"""
+        return np.negative(self)
+
+    def __pos__(self):
+        """x.__pos__() <==> +x"""
+        return self
+
+    def __abs__(self):
+        """x.__abs__() <==> abs(x)"""
+        return np.abs(self)
+
+    def __invert__(self):
+        """x.__invert__() <==> ~x"""
+        return np.invert(self)
+
+    def dot(self, other):
+        """Dot product of two arrays.
+        Refer to `numpy.dot` for full documentation."""
+        return np.dot(self, other)
+
+
+def __print_ufunc(ufunc, method, i, inputs, **kwargs):
+    print('ufunc:%s; method:%s; selfpos:%d; kwargs:%s' % (
+        repr(ufunc), method, i, kwargs))
+    for j, ar in enumerate(inputs):
+        shape = ar.shape if hasattr(ar, 'shape') else None
+        print('input %d: type=%s shape=%s' % (j, type(ar), repr(shape)))
+
+
+def _rough_size(obj):
+    if hasattr(obj, 'nbytes') and hasattr(type(obj), '__array_interface__'):
+        return obj.nbytes
+    elif isinstance(obj, Sequence) and len(obj) > 0:
+        # don't need accuracy, so for speed assume items roughly of equal size
+        return _rough_size(obj[0]) * len(obj)
+    else:
+        return sys.getsizeof(obj)
+
+
+def _engine_affinity(obj):
+    """Which engine or engines are preferred for processing this object
+    Returns: (location, weight)
+      location (integer or list of integeres): engine id (a list of engine ids
+        in the case of a distributed array.
+      weight(integer): Proportional to the cost of moving the object to a
+        different engine. Currently just taken to be the size of data.
+    """
+    from distob import engine
+    here = engine.id
+    if isinstance(obj, numbers.Number) or obj is None:
+        return (here, 0)
+    elif hasattr(obj, '__engine_affinity__'):
+        # This case includes Remote subclasses and DistArray
+        return obj.__engine_affinity__
+    else:
+        return (here, _rough_size(obj))
+
+
+def _ufunc_move_input(obj, location, bshape):
+    """Copy ufunc input `obj` to new engine location(s) unless obj is scalar.
+
+    If the input is requested to be distributed to multiple engines, this
+    function will also take care of broadcasting along the distributed axis.
+
+    If the input obj is a scalar, it will be passed through unchanged.
+
+    Args:
+      obj (array_like or scalar): one of the inputs to a ufunc
+      location (integer or tuple): If an integer, this specifies a single
+        engine id to which an array input should be moved. If it is a tuple,
+        location[0] is a list of engine ids for distributing the array input
+        and location[1] an integer indicating which axis should be distributed.
+      bshape (tuple): The shape to which the input will ultimately be broadcast
+
+    Returns:
+      array_like or RemoteArray or DistArray or scalar
+    """
+    if (not hasattr(type(obj), '__array_interface__') and
+            not isinstance(obj, Remote) and
+            (isinstance(obj, string_types) or
+             not isinstance(obj, Sequence))):
+        # then treat it as a scalar
+        return obj
+    from distob import engine
+    here = engine.id
+    if location == here:
+        # move obj to the local host, if not already here
+        if isinstance(obj, Remote) or isinstance(obj, DistArray):
+            return gather(obj)
+        else:
+            return obj
+    elif isinstance(location, numbers.Integral):
+        # move obj to a single remote engine
+        if isinstance(obj, Remote) and obj._ref.engine_id == location:
+            #print('no data movement needed!')
+            return obj
+        obj = gather(obj)
+        return _directed_scatter(obj, axis=None, destination=location)
+    else:
+        # location is a tuple (list of engine ids, distaxis) indicating that
+        # obj should be distributed.
+        engine_ids, distaxis = location
+        assert(len(engine_ids) == bshape[distaxis])
+        if not isinstance(obj, DistArray):
+            gather(obj)
+            if isinstance(obj, Sequence):
+                obj = np.array(obj)
+        if obj.ndim < len(bshape):
+            ix = (np.newaxis,)*(len(bshape)-obj.ndim) + (slice(None),)*obj.ndim
+            obj = obj[ix]
+        if (isinstance(obj, DistArray) and distaxis == obj._distaxis and
+                engine_ids == [ra._ref.engine_id for ra in obj._subarrays]):
+            #print('no data movement needed!')
+            return obj
+        obj = gather(obj)
+        if obj.shape[distaxis] == 1:
+            # broadcast this axis across engines
+            subarrays = [_directed_scatter(obj, None, m) for m in engine_ids]
+            return DistArray(subarrays, distaxis)
+        elif obj.shape[distaxis] == len(engine_ids):
+            return _directed_scatter(obj, distaxis, destination=engine_ids)
+        else:
+            raise ValueError(u'shape mismatch: two or more arrays have '
+                              'incompatible dimensions on axis %d' % distaxis)
+
+
+def _remote_f2(f, inputs, is_id, **kwargs):
+    import distob
+    in0 = distob.engine[inputs[0]] if is_id[0] else inputs[0]
+    in1 = distob.engine[inputs[1]] if is_id[1] else inputs[1]
+    result = f(in0, in1, **kwargs)
+    if type(result) in distob.engine.proxy_types:
+        return Ref(result)
+    else:
+        return result
+
+
+def _call_f2(engine_id, f, inputs, **kwargs):
+    from distob import engine
+    dv = engine._dv
+    is_id = [False, False]
+    for i, a in enumerate(inputs):
+        if isinstance(a, Remote):
+            assert(a._ref.engine_id == engine_id)
+            inputs[i] = a._ref.object_id
+            is_id[i] = True
+    dv.targets = engine_id
+    r = dv.apply_async(_remote_f2, f, inputs, is_id, **kwargs)
+    dv.targets = 'all'
+    return r
+
+
+def _convert_refs(r):
+    from distob import engine
+    if isinstance(r, Ref):
+        RemoteClass = engine.proxy_types[r.type]
+        return RemoteClass(r)
+    else:
+        return r
+
+
+def _ufunc_dispatch(ufunc, method, i, inputs, **kwargs):
+    """Route ufunc execution intelligently to local host or remote engine(s)
+    depending on where the inputs are, to minimize the need to move data.
+    Args:
+      see numpy documentation for __numpy_ufunc__
+    """
+    #__print_ufunc(ufunc, method, i, inputs, **kwargs)
+    if 'out' in kwargs:
+        raise Error('for distributed ufuncs `out=` is not yet implemented')
+    nin = 2 if ufunc is np.dot else ufunc.nin
+    if nin is 1 and method == '__call__':
+        return vectorize(ufunc.__call__)(inputs[0], **kwargs)
+    elif nin is 2 and method == '__call__':
+        from distob import engine
+        here = engine.id
+        # Choose best location for the computation, possibly distributed:
+        locs, weights = zip(*[_engine_affinity(a) for a in inputs])
+        if ufunc is np.dot:
+            locs = [here if isinstance(m, _TupleType) else m for m in locs]
+        if locs[0] is locs[1]:
+            location = locs[0]
+        else:
+            # TODO: More accurately penalize the increased data movement if we
+            # choose to distribute an axis that requires broadcasting.
+            smallest = 0 if weights[0] <= weights[1] else 1
+            largest = 1 - smallest
+            if locs[0] is here or locs[1] is here:
+                location = here if weights[0] == weights[1] else locs[largest]
+            else:
+                # Both inputs are on remote engines. With the current
+                # implementation, data on one remote engine can only be moved
+                # to another remote engine via the client. Cost accordingly:
+                if weights[smallest]*2 < weights[largest] + weights[smallest]:
+                    location = locs[largest]
+                else:
+                    location = here
+        bshape = _broadcast_shape(*inputs)
+        # Move both inputs to the chosen location:
+        inputs = [_ufunc_move_input(a, location, bshape) for a in inputs]
+        # Execute computation:
+        if location is here:
+            return ufunc.__call__(inputs[0], inputs[1], **kwargs)
+        else:
+            if isinstance(location, numbers.Integral):
+                # location is a single remote engine
+                ar = _call_f2(location, ufunc.__call__, inputs, **kwargs)
+                return _convert_refs(ar.r)
+            else:
+                # location is a tuple (list of engine ids, distaxis) implying
+                # that the moved inputs are now distributed arrays (or scalar)
+                engine_ids, distaxis = location
+                n = len(engine_ids)
+                is_dist = [isinstance(a, DistArray) for a in inputs]
+                assert(is_dist[0] or is_dist[1])
+                for i in 0, 1:
+                    if is_dist[i]:
+                        ndim = inputs[i].ndim
+                        assert(inputs[i]._distaxis == distaxis)
+                        assert(inputs[i]._n == n)
+                results = []
+                remove_axis = ((slice(None),)*(distaxis) + (0,) +
+                               (slice(None),)*(ndim - distaxis - 1))
+                for j in range(n):
+                    subinputs = [inputs[i]._subarrays[j][remove_axis] if
+                                 is_dist[i] else inputs[i] for i in 0, 1]
+                    results.append(_call_f2(engine_ids[j], ufunc.__call__,
+                                            subinputs, **kwargs))
+                results = [_convert_refs(ar.r) for ar in results]
+                results = [ra.expand_dims(distaxis) for ra in results]
+                return DistArray(results, distaxis)
+    elif ufunc.nin > 2:
+        raise Error(u'Distributing ufuncs with >2 inputs is not yet supported')
+    else:
+        raise Error(u'Distributed ufunc.%s() is not yet implemented' % method)
 
 
 def transpose(a, axes=None):
@@ -923,12 +1539,27 @@ def dsplit(a, indices_or_sections):
     return split(a, indices_or_sections, axis=2)
 
 
-def broadcast_arrays(*args):
-    if all(type(a) is np.ndarray for a in args): # exclude subclasses
-        return np.broadcast_arrays(*args)
-    shapes = [a.shape for a in args]
+def _broadcast_shape(*args):
+    """Return the shape that would result from broadcasting the inputs"""
+    #TODO: currently incorrect result if a Sequence is provided as an input
+    shapes = [a.shape if hasattr(type(a), '__array_interface__')
+              else () for a in args]
     ndim = max(len(sh) for sh in shapes) # new common ndim after broadcasting
-    arrays = list(args)
+    for i, sh in enumerate(shapes):
+        if len(sh) < ndim:
+            shapes[i] = (1,)*(ndim - len(sh)) + sh
+    return tuple(max(sh[ax] for sh in shapes) for ax in range(ndim))
+
+
+def broadcast_arrays(*args):
+    if all(type(a) is np.ndarray or 
+           not hasattr(type(a), '__array_interface__') for a in args):
+        # deliberately excludes subclasses of ndarray
+        return np.broadcast_arrays(*args)
+    arrays = [a if hasattr(type(a), '__array_interface__') 
+              else np.array(a) for a in args]
+    shapes = [a.shape for a in arrays]
+    ndim = max(len(sh) for sh in shapes) # new common ndim after broadcasting
     for i in range(len(arrays)):
         old_ndim = len(shapes[i])
         if old_ndim < ndim:

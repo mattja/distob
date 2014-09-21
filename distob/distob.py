@@ -171,7 +171,7 @@ class ObjectEngine(dict):
         if self.refcounts[key] is 1:
             super(ObjectEngine, self).__delitem__(key)
             del self.refcounts[key]
-            print('Cleaned up and deleted object %s' % key)
+            # print('Cleaned up and deleted object %s' % key)
         else:
             self.decref(key)
 
@@ -399,7 +399,8 @@ class Remote(object):
             self._obcache_current = False
         self._id = self._ref.object_id
         #Add proxy controllers for any instance-specific methods/attributes:
-        (instance_methods, instance_attribs) = self._scan_instance()
+        (instance_methods, instance_attribs, size) = self._scan_instance()
+        self.__engine_affinity__ = (self._ref.engine_id, size)
         for name, doc in instance_methods:
             def make_proxy_method(method_name, doc):
                 def method(self, *args, **kwargs):
@@ -429,6 +430,7 @@ class Remote(object):
 
     @classmethod
     def _local_scan_instance(cls, object_id, include_underscore, exclude):
+        from sys import getsizeof
         method_info = []
         attributes = []
         obj = distob.engine[object_id]
@@ -443,11 +445,16 @@ class Remote(object):
                         method_info.append((name, f.__doc__))
                     else:
                         attributes.append(name)
-        return (method_info, attributes)
+        return (method_info, attributes, getsizeof(obj))
 
     def _scan_instance(self):
         """get information on instance-methods/attributes of the object"""
-        if not self.is_local:
+        if self.is_local:
+            return Remote._local_scan_instance(
+                    self._ref.object_id, 
+                    self.__class__._include_underscore, 
+                    self.__class__._exclude)
+        else:
             return self._dv.apply_sync(Remote._local_scan_instance,
                                        self._ref.object_id,
                                        self.__class__._include_underscore,
@@ -531,6 +538,8 @@ class Remote(object):
             #print('fetching data from %s' % self._ref.object_id)
             self._obcache = self._dv['distob.engine["%s"]' % self._id]
             self._obcache_current = True
+            self.__engine_affinity__ = (distob.engine.id, 
+                                        self.__engine_affinity__[1])
 
     def __ob(self):
         """return a local copy of the real object"""
@@ -674,7 +683,7 @@ def proxy_methods(base, include_underscore=None, exclude=None, supers=True):
     return rebuild_class
 
 
-def _async_scatter(obj):
+def _async_scatter(obj, destination=None):
     """Distribute an obj or list to remote engines. 
     Return an async result or (possibly nested) lists of async results, 
     each of which is a Ref
@@ -688,8 +697,13 @@ def _async_scatter(obj):
     if (isinstance(obj, collections.Sequence) and 
             not isinstance(obj, string_types)):
         ars = []
-        for i in range(len(obj)):
-            ars.append(_async_scatter(obj[i]))
+        if destination is not None:
+            assert(len(destination) == len(obj))
+            for i in range(len(obj)):
+                ars.append(_async_scatter(obj[i], destination[i]))
+        else:
+            for i in range(len(obj)):
+                ars.append(_async_scatter(obj[i], destination=None))
         return ars
     else:
         if distob.engine is None:
@@ -698,10 +712,14 @@ def _async_scatter(obj):
         dv = distob.engine._dv
         def remote_put(obj):
             return Ref(obj)
-        dv.targets = _async_scatter.next_engine
+        if destination is not None:
+            assert(isinstance(destination, numbers.Integral))
+            dv.targets = destination
+        else:
+            dv.targets = _async_scatter.next_engine
+            _async_scatter.next_engine = (
+                    _async_scatter.next_engine + 1) % len(client)
         ar_ref = dv.apply_async(remote_put, obj)
-        _async_scatter.next_engine = (
-                _async_scatter.next_engine + 1) % len(client)
         dv.targets = client.ids
         return ar_ref
 
@@ -738,20 +756,29 @@ def _ars_to_proxies(ars):
         raise DistobTypeError('Unpacking ars: unexpected type %s' % type(ars))
 
 
-def _scatter_ndarray(ar, axis=-1):
-    """Turn a numpy ndarray into a distributed array"""
+def _scatter_ndarray(ar, axis=-1, destination=None):
+    """Turn a numpy ndarray into a DistArray or RemoteArray
+    Args:
+     ar (array_like)
+     axis (int, optional): specifies along which axis to split the array to 
+       distribute it. The default is to split along the last axis. `None` means
+       do not distribute.
+     destination (int or list of int, optional): Optionally force the array to
+       go to a specific engine. If an array is to be scattered along an axis, 
+       this should be a list of engine ids with the same length as that axis.
+    """
     from .arrays import DistArray, RemoteArray
     shape = ar.shape
     ndim = len(shape)
     if axis is None:
-        return scatter([ar])[0]
+        return _directed_scatter([ar], destination=[destination])[0]
     if axis < -ndim or axis > ndim - 1:
         raise DistobValueError('axis out of range')
     if axis < 0:
         axis = ndim + axis
     n = shape[axis]
     if n == 1:
-        return scatter([ar])[0]
+        return _directed_scatter([ar], destination=[destination])[0]
     if distob.engine is None:
         _setup_engines()
     num_engines = len(distob.engine._client)
@@ -774,8 +801,31 @@ def _scatter_ndarray(ar, axis=-1):
     for i in range(n):
         index = (s,)*axis + (slice(i,i+1),) + (s,)*(ndim - axis - 1)
         subarrays.append(ar[index])
-    subarrays = scatter(subarrays)
+    subarrays = _directed_scatter(subarrays, destination=destination)
     return DistArray(subarrays, axis)
+
+
+def _directed_scatter(obj, axis=-1, destination=None):
+    """Same as scatter() but allows forcing the object to a specific engine id.
+    Currently, this is intended for distob internal use only, so that ufunc
+    operands can be sent to the same engine.
+    Args:
+      destination (int or list of int, optional): the engine id (or ids). If 
+        scattering a sequence, this should be a list of engine ids with the
+        same length as the sequence. If an array is to be scattered along an
+        axis, this should be a list of engine ids with the same length as 
+        that axis.
+    """
+    if hasattr(obj, '__distob_scatter__'):
+        return obj.__distob_scatter__(axis, destination)
+    if distob._have_numpy and (isinstance(obj, np.ndarray) or
+                        hasattr(type(obj), '__array_interface__')):
+        return _scatter_ndarray(obj, axis, destination)
+    elif isinstance(obj, Remote):
+        return obj
+    ars = _async_scatter(obj, destination)
+    proxy_obj = _ars_to_proxies(ars)
+    return proxy_obj
 
 
 def scatter(obj, axis=-1):
@@ -784,15 +834,13 @@ def scatter(obj, axis=-1):
       obj: any python object, or list of objects
       axis (int, optional): currently only used if scattering a numpy array,
         specifying along which axis to split the array to distribute it. The 
-        default is to split along the last axis.
+        default is to split along the last axis. `None` means do not distribute
     """
     if hasattr(obj, '__distob_scatter__'):
         return obj.__distob_scatter__(axis)
     if distob._have_numpy and (isinstance(obj, np.ndarray) or
                         hasattr(type(obj), '__array_interface__')):
         return _scatter_ndarray(obj, axis)
-    if axis is not -1:
-        raise DistobValueError('`axis` argument only applies to ndarrays')
     elif isinstance(obj, Remote):
         return obj
     ars = _async_scatter(obj)
