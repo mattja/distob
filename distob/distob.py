@@ -465,14 +465,18 @@ class Remote(object):
         #print('in _apply: type=%s, method_name==%s, args==%s, kwargs==%s' % (
         #        type(self), method_name, args, kwargs))
         def remote_call_method(object_id, method_name, *args, **kwargs):
-            obj = distob.engine[object_id]
-            result = obj.__getattribute__(method_name)(*args, **kwargs)
-            if type(result) in distob.engine.proxy_types:
-                return Ref(result)
+            r = getattr(distob.engine[object_id], method_name)(*args, **kwargs)
+            if type(r) in distob.engine.proxy_types:
+                return Ref(r)
             else:
-                return result
-        r = self._dv.apply_sync(remote_call_method, self._id, 
-                                method_name, *args, **kwargs)
+                return r
+        if self._ref.engine_id is distob.engine.id:
+            r = getattr(distob.engine[self._id], method_name)(*args, **kwargs)
+        elif self._obcache_current:
+            r = getattr(self._obcache, method_name)(*args, **kwargs)
+        else:
+            r = self._dv.apply_sync(remote_call_method, self._id, 
+                                    method_name, *args, **kwargs)
         if isinstance(r, Ref):
             RemoteClass = distob.engine.proxy_types[r.type]
             return RemoteClass(r)
@@ -517,20 +521,16 @@ class Remote(object):
           ipython.parallel.AsyncResult: async output of the remote method
         """
         def remote_call_method(object_id, method_name, *args, **kwargs):
-            obj = distob.engine[object_id]
-            result = obj.__getattribute__(method_name)(*args, **kwargs)
-            if type(result) in distob.engine.proxy_types:
-                return Ref(result)
+            r = getattr(distob.engine[object_id], method_name)(*args, **kwargs)
+            if type(r) in distob.engine.proxy_types:
+                return Ref(r)
             else:
-                return result
+                return r
+        if self._ref.engine_id is distob.engine_id:
+            raise Error("currently can't use _apply_async if object is local")
         ar = self._dv.apply_async(remote_call_method, self._id, 
                                   method_name, *args, **kwargs)
         return ar
-        if isinstance(r, Ref):
-            RemoteClass = distob.engine.proxy_types[r.type]
-            return RemoteClass(r)
-        else:
-            return r
 
     def _fetch(self):
         """update local cached copy of the real object"""
