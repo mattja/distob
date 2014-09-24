@@ -115,12 +115,12 @@ class RemoteArray(Remote, object):
         """
         #print('In RemoteArray __array_prepare__. context=%s' % repr(context))
         if map(int, np.version.short_version.split('.')) < [1,10,0]:
-            msg = (u'Warning: Distob distributed array arithmetic and ufunc ' +
-                    'support requires numpy 1.10.0 or later (not yet ' +
-                    'released!) \nCan get the latest numpy here: ' +
+            msg = (u'\nNote: Distob distributed array arithmetic and ufunc ' +
+                    'support requires\nnumpy 1.10.0 or later (not yet ' +
+                    'released!) Can get the latest numpy here: \n' +
                     'https://github.com/numpy/numpy/archive/master.zip\n' +
-                    'In the meantime, will bring data back to the client to ' +
-                    'perform the requested operation...')
+                    'Otherwise, will bring data back to the client to ' +
+                    'perform the \'%s\' operation...' % context[0].__name__)
             _brief_warning(msg, stacklevel=3)
             return out_arr
         else:
@@ -429,6 +429,7 @@ class DistArray(object):
         self._n = len(subarrays)  # Length of the distributed axis.
         if self._n < 2:
             raise ValueError('must provide more than one subarray')
+        self._cache_pref = True
         self._obcache = None
         self._obcache_current = False
         # In the subarrays list, accept RemoteArray, ndarray or Ref to ndarray:
@@ -469,8 +470,22 @@ class DistArray(object):
         if all(ra._obcache_current for ra in self._subarrays):
             self._fetch()
 
+    def __get_cache_pref(self):
+        return self._cache_pref
+
+    def __set_cache_pref(self, value):
+        if not isinstance(value, bool):
+            raise ValueError('cache preference can only be True or False')
+        self._cache_pref = value
+        for ra in self._subarrays:
+            ra.cache = value
+
+    cache = property(fget=__get_cache_pref, fset=__set_cache_pref,
+                     doc='whether remote results should be cached locally')
+
     def _fetch(self):
-        """update local cached copy of the real object"""
+        """forces update of a local cached copy of the real object
+        (regardless of the preference setting self.cache)"""
         if not self._obcache_current:
             from distob import engine
             ax = self._distaxis
@@ -489,7 +504,7 @@ class DistArray(object):
         self._fetch()
         return self._obcache
 
-    _ob = property(fget=__ob)
+    _ob = property(fget=__ob, doc='return a local copy of the object')
 
     #If a local consumer asks for direct data access via the python
     #array interface, attempt to put a local copy of all the data into memory
@@ -583,16 +598,16 @@ class DistArray(object):
         """
         #print('In DistArray __array_prepare__. context=%s' % repr(context))
         if map(int, np.version.short_version.split('.')) < [1,10,0]:
-            msg = (u'Warning: Distob distributed array arithmetic and ufunc ' +
-                   u'support requires numpy 1.10.0 or later (not yet ' +
-                   u'released!) Can get the latest snapshot here: ' +
-                   u'https://github.com/numpy/numpy/archive/master.zip\n' +
-                   u'In the meantime, will bring data back to the client to ' +
-                   u'perform the requested operation...')
+            msg = (u'\nNote: Distob distributed array arithmetic and ufunc ' +
+                    'support requires\nnumpy 1.10.0 or later (not yet ' +
+                    'released!) Can get the latest numpy here: \n' +
+                    'https://github.com/numpy/numpy/archive/master.zip\n' +
+                    'Otherwise, will bring data back to the client to ' +
+                    'perform the \'%s\' operation...' % context[0].__name__)
             _brief_warning(msg, stacklevel=3)
+            return out_arr
         else:
             raise Error('Have numpy >=1.10 but still called __array_prepare__')
-        return out_arr
 
     def __array_wrap__(self, out_arr, context=None):
         #print('In DistArray __array_wrap__')
@@ -798,7 +813,10 @@ class DistArray(object):
         def vf(self, *args, **kwargs):
             remove_axis = ((slice(None),)*(self._distaxis) + (0,) +
                            (slice(None),)*(self.ndim - self._distaxis - 1))
+            old_cache_pref = self.cache
+            self.cache = False
             refs = [ra[remove_axis]._ref for ra in self._subarrays]
+            self.cache = old_cache_pref
             from distob import engine
             dv = engine._client[:]
             def remote_f(object_id, *args, **kwargs):
@@ -810,6 +828,7 @@ class DistArray(object):
                     return result
             results = []
             for ref in refs:
+                # TODO: currently does not allow subarrays to be on the client
                 dv.targets = ref.engine_id
                 ar = dv.apply_async(remote_f, ref.object_id, *args, **kwargs)
                 results.append(ar)

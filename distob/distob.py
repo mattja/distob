@@ -398,18 +398,23 @@ class Remote(object):
             self._obcache = None
             self._obcache_current = False
         self._id = self._ref.object_id
+        self.cache = True # preference setting: whether to cache remote results
         #Add proxy controllers for any instance-specific methods/attributes:
         (instance_methods, instance_attribs, size) = self._scan_instance()
         self.__engine_affinity__ = (self._ref.engine_id, size)
         for name, doc in instance_methods:
             def make_proxy_method(method_name, doc):
                 def method(self, *args, **kwargs):
-                    if self._obcache_current:
-                        return apply(getattr(self._obcache, method_name),
-                                     *args, **kwargs)
+                    if self.cache:
+                        if self._obcache_current:
+                            return apply(getattr(self._obcache, method_name),
+                                         *args, **kwargs)
+                        else:
+                            return cls._try_cached_apply(self, method_name,
+                                                         *args, **kwargs)
                     else:
-                        return cls._try_cached_apply(self, method_name,
-                                                     *args, **kwargs)
+                            return cls._apply(self, method_name, 
+                                              *args, **kwargs)
                 method.__doc__ = doc
                 method.__name__ = method_name
                 #return types.MethodType(method, None, cls)
@@ -419,11 +424,14 @@ class Remote(object):
             def make_property(attrib_name):
                 # TODO: implement fset and fdel (requires writeback cache)
                 def getter(self):
-                    if self._obcache_current:
-                        return getattr(self._obcache, attrib_name)
+                    if self.cache:
+                        if self._obcache_current:
+                            return getattr(self._obcache, attrib_name)
+                        else:
+                            return self._cached_apply('__getattribute__', 
+                                                      attrib_name) 
                     else:
-                        return self._cached_apply('__getattribute__', 
-                                                  attrib_name) 
+                        return self._apply('__getattribute__', attrib_name)
                 prop = property(fget=getter)
                 return prop
             setattr(self.__class__, name, make_property(name))
@@ -472,7 +480,7 @@ class Remote(object):
                 return r
         if self._ref.engine_id is distob.engine.id:
             r = getattr(distob.engine[self._id], method_name)(*args, **kwargs)
-        elif self._obcache_current:
+        elif self.cache and self._obcache_current:
             r = getattr(self._obcache, method_name)(*args, **kwargs)
         else:
             r = self._dv.apply_sync(remote_call_method, self._id, 
@@ -533,7 +541,8 @@ class Remote(object):
         return ar
 
     def _fetch(self):
-        """update local cached copy of the real object"""
+        """forces update of a local cached copy of the real object
+        (regardless of the preference setting self.cache)"""
         if not self.is_local and not self._obcache_current:
             #print('fetching data from %s' % self._ref.object_id)
             self._obcache = self._dv['distob.engine["%s"]' % self._id]
@@ -546,7 +555,7 @@ class Remote(object):
         self._fetch()
         return self._obcache
 
-    _ob = property(fget=__ob)
+    _ob = property(fget=__ob, doc='return a local copy of the object')
 
     def __distob_gather__(self):
         return self._ob
@@ -642,12 +651,16 @@ def proxy_methods(base, include_underscore=None, exclude=None, supers=True):
             for name in c.__dict__:
                 def mk_proxy_method(method_name, doc):
                     def method(self, *args, **kwargs):
-                        if self._obcache_current:
-                            return getattr(self._obcache, method_name)(
-                                    *args, **kwargs)
+                        if self.cache:
+                            if self._obcache_current:
+                                return getattr(self._obcache, method_name)(
+                                        *args, **kwargs)
+                            else:
+                                return newcls._try_cached_apply(
+                                        self, method_name, *args, **kwargs)
                         else:
-                            return newcls._try_cached_apply(self, method_name,
-                                                            *args, **kwargs)
+                            return newcls._apply(
+                                    self, method_name, *args, **kwargs)
                     method.__doc__ = doc
                     method.__name__ = method_name
                     #return types.MethodType(method, None, newcls)
@@ -655,11 +668,14 @@ def proxy_methods(base, include_underscore=None, exclude=None, supers=True):
                 def mk_property(attrib_name):
                     # TODO: implement fset and fdel (requires writeback cache)
                     def getter(self):
-                        if self._obcache_current:
-                            return getattr(self._obcache, attrib_name)
+                        if self.cache:
+                            if self._obcache_current:
+                                return getattr(self._obcache, attrib_name)
+                            else:
+                                return self._cached_apply('__getattribute__',
+                                                          attrib_name)
                         else:
-                            return self._cached_apply('__getattribute__',
-                                                      attrib_name)
+                            return self._apply('__getattribute__', attrib_name)
                     prop = property(fget=getter)
                     return prop
                 #respect MRO: proxy an attribute only if it is not overridden
@@ -892,7 +908,7 @@ def vectorize(f):
                 return r
         elif distob._have_numpy and (isinstance(obj, np.ndarray) or
                  hasattr(type(obj), '__array_interface__')):
-            distarray = scatter(obj, axis=None)
+            distarray = scatter(obj, axis=-1)
             return vf(distarray, *args, **kwargs)
         elif isinstance(obj, collections.Sequence):
             inputs = scatter(obj)
