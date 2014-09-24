@@ -195,11 +195,12 @@ class RemoteArray(Remote, object):
                 ids = [ref.object_id for ref in refs]
                 dv = engine._client[eng_id]
                 def remote_concat(ids, axis):
-                    from distob import engine
-                    ar = np.concatenate([engine[id] for id in ids], axis)
+                    from distob import engine, concatenate
+                    ar = concatenate([engine[id] for id in ids], axis)
                     return Ref(ar)
                 ref = dv.apply_sync(remote_concat, ids, axis)
-                return RemoteArray(ref)
+                RemoteClass = engine.proxy_types[ref.type]
+                return RemoteClass(ref)
         else:
             # Arrays to be joined are on different engines.
             concatenation_axis_lengths = [ra.shape[axis] for ra in rarrays]
@@ -417,7 +418,7 @@ class DistArray(object):
         """Make a DistArray from a list of existing remote numpy.ndarrays
 
         Args:
-          subarrays (list of RemoteArray, or list of Ref to ndarray): 
+          subarrays (list of RemoteArrays, ndarrays or Refs to ndarrays):
             the subarrays (possibly remote) which form the whole array when
             concatenated. The subarrays must all have the same shape and dtype.
             Currently must have `a.shape[axis] == 1` for each subarray `a`
@@ -430,9 +431,14 @@ class DistArray(object):
             raise ValueError('must provide more than one subarray')
         self._obcache = None
         self._obcache_current = False
-        # In the subarrays list, accept either RemoteArray or Ref to ndarray:
-        subarrays = [ra if isinstance(ra, RemoteArray)
-                     else RemoteArray(ra) for ra in subarrays]
+        # In the subarrays list, accept RemoteArray, ndarray or Ref to ndarray:
+        for i, ra in enumerate(subarrays):
+            if not isinstance(ra, RemoteArray):
+                if not isinstance(ra, Ref):
+                    ra = Ref(ra)
+                from distob import engine
+                RemoteClass = engine.proxy_types[ra.type]
+                subarrays[i] = RemoteClass(ra)
         first_ra_metadata = subarrays[0]._ref.metadata
         if not all(ra._ref.metadata == first_ra_metadata for ra in subarrays):
             raise ValueError('subarrays must have same shape, strides & dtype')
@@ -460,6 +466,8 @@ class DistArray(object):
                             'typestr': typestr, 'version': 3}
         location = ([ra._ref.engine_id for ra in subarrays], self._distaxis)
         self.__engine_affinity__ = (location, np.prod(shape)*itemsize)
+        if all(ra._obcache_current for ra in self._subarrays):
+            self._fetch()
 
     def _fetch(self):
         """update local cached copy of the real object"""
