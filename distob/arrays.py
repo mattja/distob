@@ -1298,6 +1298,13 @@ def _ufunc_dispatch(ufunc, method, i, inputs, **kwargs):
         here = engine.id
         # Choose best location for the computation, possibly distributed:
         locs, weights = zip(*[_engine_affinity(a) for a in inputs])
+        # for DistArrays, adjust preferred distaxis to account for broadcasting
+        bshape = _broadcast_shape(*inputs)
+        locs = list(locs)
+        for i, loc in enumerate(locs):
+            num_new_axes = len(bshape) - inputs[i].ndim
+            if isinstance(loc, _TupleType) and num_new_axes > 0:
+                locs[i] = (locs[i][0], locs[i][1] + num_new_axes)
         if ufunc is np.dot:
             locs = [here if isinstance(m, _TupleType) else m for m in locs]
         if locs[0] is locs[1]:
@@ -1317,7 +1324,6 @@ def _ufunc_dispatch(ufunc, method, i, inputs, **kwargs):
                     location = locs[largest]
                 else:
                     location = here
-        bshape = _broadcast_shape(*inputs)
         # Move both inputs to the chosen location:
         inputs = [_ufunc_move_input(a, location, bshape) for a in inputs]
         # Execute computation:
