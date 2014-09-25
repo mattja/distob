@@ -76,6 +76,8 @@ class Ref(object):
         may be defined by specific Remote* classes, to help set up access.
     """
     def __init__(self, obj):
+        if isinstance(obj, Remote):
+            obj = obj._ref
         if isinstance(obj, Ref):
             self.engine_id = obj.engine_id
             self.object_id = obj.object_id
