@@ -6,8 +6,9 @@ try:
 except ImportError:
     _have_numpy = False
 
-from .distob import (scatter, gather, vectorize, apply, call_all, 
-                     Remote, proxy_methods, ObjectHub, ObjectEngine, Ref)
+from .distob import (scatter, gather, vectorize, apply, call_all,
+                     Remote, proxy_methods, ObjectHub, ObjectEngine, Id, Ref,
+                     call, methodcall, convert_result)
 
 engine = None
 

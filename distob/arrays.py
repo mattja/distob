@@ -2,8 +2,9 @@
 """
 
 from __future__ import absolute_import
-from .distob import (proxy_methods, Remote, Ref, Error, 
-                     scatter, gather, _directed_scatter, vectorize)
+from .distob import (proxy_methods, Remote, Ref, Error,
+                     scatter, gather, _directed_scatter, vectorize,
+                     call, methodcall, convert_result)
 import numpy as np
 from collections import Sequence
 import numbers
@@ -51,7 +52,7 @@ class RemoteArray(Remote, object):
         self._array_intf = {'descr': descr, 'shape': shape, 'strides': strides,
                             'typestr': typestr, 'version': 3}
         self.dtype = np.dtype(typestr)
-        self.__engine_affinity__ = (self._ref.engine_id, self.nbytes)
+        self.__engine_affinity__ = (self._id.engine, self.nbytes)
 
     #If a local consumer wants direct data access via the python 
     #array interface, then ensure a local copy of the data is in memory
@@ -94,8 +95,8 @@ class RemoteArray(Remote, object):
         return metadata
 
     def __repr__(self):
-        return self._cached_apply('__repr__').replace(
-            'array', self.__class__.__name__, 1)
+        return methodcall(self, '__repr__').replace(
+                'array', self.__class__.__name__, 1)
 
     def __len__(self):
         return self._array_intf['shape'][0]
@@ -114,7 +115,7 @@ class RemoteArray(Remote, object):
         support for the __numpy_ufunc__ mechanism. 
         """
         #print('In RemoteArray __array_prepare__. context=%s' % repr(context))
-        if map(int, np.version.short_version.split('.')) < [1,10,0]:
+        if list(map(int, np.version.short_version.split('.'))) < [1,10,0]:
             msg = (u'\nNote: Distob distributed array arithmetic and ufunc ' +
                     'support requires\nnumpy 1.10.0 or later (not yet ' +
                     'released!) Can get the latest numpy here: \n' +
@@ -182,25 +183,10 @@ class RemoteArray(Remote, object):
                 arrays.append(np.array(ar))
         rarrays = scatter(arrays) # TODO: this will only work on the client
         # At this point rarrays is a list of RemoteArray to be concatenated
-        refs = [ra._ref for ra in rarrays]
-        eng_id = refs[0].engine_id
-        if all(ref.engine_id == eng_id for ref in refs):
+        eid = rarrays[0]._id.engine
+        if all(ra._id.engine == eid for ra in rarrays):
             # Arrays to be joined are all on the same engine
-            from distob import engine
-            if eng_id == engine.id:
-                # All are on local host. Concatenate the local objects:
-                return concatenate([engine[r.object_id] for r in refs], axis)
-            else:
-                # All are on the same remote host. Concatenate to a RemoteArray
-                ids = [ref.object_id for ref in refs]
-                dv = engine._client[eng_id]
-                def remote_concat(ids, axis):
-                    from distob import engine, concatenate
-                    ar = concatenate([engine[id] for id in ids], axis)
-                    return Ref(ar)
-                ref = dv.apply_sync(remote_concat, ids, axis)
-                RemoteClass = engine.proxy_types[ref.type]
-                return RemoteClass(ref)
+            return call(concatenate, rarrays, axis)
         else:
             # Arrays to be joined are on different engines.
             concatenation_axis_lengths = [ra.shape[axis] for ra in rarrays]
@@ -429,7 +415,7 @@ class DistArray(object):
         self._n = len(subarrays)  # Length of the distributed axis.
         if self._n < 2:
             raise ValueError('must provide more than one subarray')
-        self._cache_pref = True
+        self._pref_local = True
         self._obcache = None
         self._obcache_current = False
         # In the subarrays list, accept RemoteArray, ndarray or Ref to ndarray:
@@ -465,23 +451,23 @@ class DistArray(object):
         # implement the python array interface
         self._array_intf = {'descr': descr, 'shape': shape, 'strides': strides,
                             'typestr': typestr, 'version': 3}
-        location = ([ra._ref.engine_id for ra in subarrays], self._distaxis)
+        location = ([ra._ref.id.engine for ra in subarrays], self._distaxis)
         self.__engine_affinity__ = (location, np.prod(shape)*itemsize)
         if all(ra._obcache_current for ra in self._subarrays):
             self._fetch()
 
-    def __get_cache_pref(self):
-        return self._cache_pref
+    def __get_pref_local(self):
+        return self._pref_local
 
-    def __set_cache_pref(self, value):
+    def __set_pref_local(self, value):
         if not isinstance(value, bool):
-            raise ValueError('cache preference can only be True or False')
-        self._cache_pref = value
+            raise ValueError("'prefer_local' can only be set to True or False")
+        self._pref_local = value
         for ra in self._subarrays:
-            ra.cache = value
+            ra.prefer_local = value
 
-    cache = property(fget=__get_cache_pref, fset=__set_cache_pref,
-                     doc='whether remote results should be cached locally')
+    prefer_local = property(fget=__get_pref_local, fset=__set_pref_local,
+                            doc='whether to use locally cached results')
 
     def _fetch(self):
         """forces update of a local cached copy of the real object
@@ -497,7 +483,8 @@ class DistArray(object):
                 self._subarrays[i]._obcache = self._obcache[tuple(ix)]
             self._obcache_current = True
             # now prefer local processing:
-            self.__engine_affinity__ = (engine.id, self.__engine_affinity__[1])
+            self.__engine_affinity__ = (
+                    engine.eid, self.__engine_affinity__[1])
 
     def __ob(self):
         """return a copy of the real object"""
@@ -597,7 +584,7 @@ class DistArray(object):
         support for the __numpy_ufunc__ mechanism. 
         """
         #print('In DistArray __array_prepare__. context=%s' % repr(context))
-        if map(int, np.version.short_version.split('.')) < [1,10,0]:
+        if list(map(int, np.version.short_version.split('.'))) < [1,10,0]:
             msg = (u'\nNote: Distob distributed array arithmetic and ufunc ' +
                     'support requires\nnumpy 1.10.0 or later (not yet ' +
                     'released!) Can get the latest numpy here: \n' +
@@ -810,36 +797,19 @@ class DistArray(object):
             DistArray. (otherwise will return a list with the result for each 
             subarray).
         """
+        def _reduced_f(a, distaxis, *args, **kwargs):
+            """(Executed on a remote or local engine) Remove specified axis
+            from array `a` and then apply f to it"""
+            remove_axis = ((slice(None),)*(distaxis) + (0,) +
+                           (slice(None),)*(a.ndim - distaxis - 1))
+            return f(a[remove_axis], *args, **kwargs)
         def vf(self, *args, **kwargs):
-            remove_axis = ((slice(None),)*(self._distaxis) + (0,) +
-                           (slice(None),)*(self.ndim - self._distaxis - 1))
-            old_cache_pref = self.cache
-            self.cache = False
-            refs = [ra[remove_axis]._ref for ra in self._subarrays]
-            self.cache = old_cache_pref
-            from distob import engine
-            dv = engine._client[:]
-            def remote_f(object_id, *args, **kwargs):
-                import distob
-                result = f(distob.engine[object_id], *args, **kwargs)
-                if type(result) in distob.engine.proxy_types:
-                    return Ref(result)
-                else:
-                    return result
-            results = []
-            for ref in refs:
-                # TODO: currently does not allow subarrays to be on the client
-                dv.targets = ref.engine_id
-                ar = dv.apply_async(remote_f, ref.object_id, *args, **kwargs)
-                results.append(ar)
-            for i in range(len(results)):
-                ar = results[i]
-                ar.wait()
-                results[i] = ar.r
-                if isinstance(results[i], Ref):
-                    ref = results[i]
-                    RemoteClass = engine.proxy_types[ref.type]
-                    results[i] = RemoteClass(ref)
+            kwargs = kwargs.copy()
+            kwargs['block'] = False
+            kwargs['prefer_local'] = False
+            ars = [call(_reduced_f, ra, self._distaxis,
+                        *args, **kwargs) for ra in self._subarrays]
+            results = [convert_result(ar) for ar in ars]
             if (all(isinstance(r, RemoteArray) for r in results) and
                     all(r.shape == results[0].shape for r in results)):
                 # Then we can join the results and return a DistArray.
@@ -1168,14 +1138,14 @@ def _engine_affinity(obj):
         different engine. Currently just taken to be the size of data.
     """
     from distob import engine
-    here = engine.id
+    this_engine = engine.eid
     if isinstance(obj, numbers.Number) or obj is None:
-        return (here, 0)
+        return (this_engine, 0)
     elif hasattr(obj, '__engine_affinity__'):
         # This case includes Remote subclasses and DistArray
         return obj.__engine_affinity__
     else:
-        return (here, _rough_size(obj))
+        return (this_engine, _rough_size(obj))
 
 
 def _ufunc_move_input(obj, location, bshape):
@@ -1204,8 +1174,8 @@ def _ufunc_move_input(obj, location, bshape):
         # then treat it as a scalar
         return obj
     from distob import engine
-    here = engine.id
-    if location == here:
+    this_engine = engine.eid
+    if location == this_engine:
         # move obj to the local host, if not already here
         if isinstance(obj, Remote) or isinstance(obj, DistArray):
             return gather(obj)
@@ -1213,7 +1183,7 @@ def _ufunc_move_input(obj, location, bshape):
             return obj
     elif isinstance(location, numbers.Integral):
         # move obj to a single remote engine
-        if isinstance(obj, Remote) and obj._ref.engine_id == location:
+        if isinstance(obj, Remote) and obj._ref.id.engine == location:
             #print('no data movement needed!')
             return obj
         obj = gather(obj)
@@ -1231,7 +1201,7 @@ def _ufunc_move_input(obj, location, bshape):
             ix = (np.newaxis,)*(len(bshape)-obj.ndim) + (slice(None),)*obj.ndim
             obj = obj[ix]
         if (isinstance(obj, DistArray) and distaxis == obj._distaxis and
-                engine_ids == [ra._ref.engine_id for ra in obj._subarrays]):
+                engine_ids == [ra._ref.id.engine for ra in obj._subarrays]):
             #print('no data movement needed!')
             return obj
         obj = gather(obj)
@@ -1246,41 +1216,6 @@ def _ufunc_move_input(obj, location, bshape):
                               'incompatible dimensions on axis %d' % distaxis)
 
 
-def _remote_f2(f, inputs, is_id, **kwargs):
-    import distob
-    in0 = distob.engine[inputs[0]] if is_id[0] else inputs[0]
-    in1 = distob.engine[inputs[1]] if is_id[1] else inputs[1]
-    result = f(in0, in1, **kwargs)
-    if type(result) in distob.engine.proxy_types:
-        return Ref(result)
-    else:
-        return result
-
-
-def _call_f2(engine_id, f, inputs, **kwargs):
-    from distob import engine
-    dv = engine._dv
-    is_id = [False, False]
-    for i, a in enumerate(inputs):
-        if isinstance(a, Remote):
-            assert(a._ref.engine_id == engine_id)
-            inputs[i] = a._ref.object_id
-            is_id[i] = True
-    dv.targets = engine_id
-    r = dv.apply_async(_remote_f2, f, inputs, is_id, **kwargs)
-    dv.targets = 'all'
-    return r
-
-
-def _convert_refs(r):
-    from distob import engine
-    if isinstance(r, Ref):
-        RemoteClass = engine.proxy_types[r.type]
-        return RemoteClass(r)
-    else:
-        return r
-
-
 def _ufunc_dispatch(ufunc, method, i, inputs, **kwargs):
     """Route ufunc execution intelligently to local host or remote engine(s)
     depending on where the inputs are, to minimize the need to move data.
@@ -1288,26 +1223,27 @@ def _ufunc_dispatch(ufunc, method, i, inputs, **kwargs):
       see numpy documentation for __numpy_ufunc__
     """
     #__print_ufunc(ufunc, method, i, inputs, **kwargs)
-    if 'out' in kwargs:
+    if 'out' in kwargs and kwargs['out'] is not None:
         raise Error('for distributed ufuncs `out=` is not yet implemented')
     nin = 2 if ufunc is np.dot else ufunc.nin
     if nin is 1 and method == '__call__':
         return vectorize(ufunc.__call__)(inputs[0], **kwargs)
     elif nin is 2 and method == '__call__':
         from distob import engine
-        here = engine.id
+        here = engine.eid
         # Choose best location for the computation, possibly distributed:
         locs, weights = zip(*[_engine_affinity(a) for a in inputs])
         # for DistArrays, adjust preferred distaxis to account for broadcasting
         bshape = _broadcast_shape(*inputs)
         locs = list(locs)
         for i, loc in enumerate(locs):
-            num_new_axes = len(bshape) - inputs[i].ndim
-            if isinstance(loc, _TupleType) and num_new_axes > 0:
-                locs[i] = (locs[i][0], locs[i][1] + num_new_axes)
+            if isinstance(loc, _TupleType):
+                num_new_axes = len(bshape) - inputs[i].ndim
+                if num_new_axes > 0:
+                    locs[i] = (locs[i][0], locs[i][1] + num_new_axes)
         if ufunc is np.dot:
             locs = [here if isinstance(m, _TupleType) else m for m in locs]
-        if locs[0] is locs[1]:
+        if locs[0] == locs[1]:
             location = locs[0]
         else:
             # TODO: More accurately penalize the increased data movement if we
@@ -1332,29 +1268,37 @@ def _ufunc_dispatch(ufunc, method, i, inputs, **kwargs):
         else:
             if isinstance(location, numbers.Integral):
                 # location is a single remote engine
-                ar = _call_f2(location, ufunc.__call__, inputs, **kwargs)
-                return _convert_refs(ar.r)
+                return call(ufunc.__call__, inputs[0], inputs[1], **kwargs)
             else:
                 # location is a tuple (list of engine ids, distaxis) implying
                 # that the moved inputs are now distributed arrays (or scalar)
                 engine_ids, distaxis = location
                 n = len(engine_ids)
-                is_dist = [isinstance(a, DistArray) for a in inputs]
+                is_dist = tuple(isinstance(a, DistArray) for a in inputs)
                 assert(is_dist[0] or is_dist[1])
                 for i in 0, 1:
                     if is_dist[i]:
                         ndim = inputs[i].ndim
                         assert(inputs[i]._distaxis == distaxis)
                         assert(inputs[i]._n == n)
+                def _reduced_call(inputs, is_dist, ndim, distaxis, **kwargs):
+                    """(Executed on a remote or local engine) Remove specified
+                    axis from subarray inputs then apply the ufunc call """
+                    remove_ax = ((slice(None),)*(distaxis) + (0,) +
+                                 (slice(None),)*(ndim - distaxis - 1))
+                    input0 = inputs[0][remove_ax] if is_dist[0] else inputs[0]
+                    input1 = inputs[1][remove_ax] if is_dist[1] else inputs[1]
+                    return ufunc.__call__(input0, input1, **kwargs)
                 results = []
-                remove_axis = ((slice(None),)*(distaxis) + (0,) +
-                               (slice(None),)*(ndim - distaxis - 1))
+                kwargs = kwargs.copy()
+                kwargs['block'] = False
+                kwargs['prefer_local'] = False
                 for j in range(n):
-                    subinputs = [inputs[i]._subarrays[j][remove_axis] if
-                                 is_dist[i] else inputs[i] for i in 0, 1]
-                    results.append(_call_f2(engine_ids[j], ufunc.__call__,
-                                            subinputs, **kwargs))
-                results = [_convert_refs(ar.r) for ar in results]
+                    subinputs = tuple(inputs[i]._subarrays[j] if 
+                            is_dist[i] else inputs[i] for i in (0, 1))
+                    results.append(call(_reduced_call, subinputs, is_dist,
+                                        ndim, distaxis, **kwargs))
+                results = [convert_result(ar) for ar in results]
                 results = [ra.expand_dims(distaxis) for ra in results]
                 return DistArray(results, distaxis)
     elif ufunc.nin > 2:
@@ -1443,11 +1387,7 @@ def _remote_to_array(remote):
     if isinstance(remote, RemoteArray):
         return remote
     else:
-        from distob import engine
-        dv = engine._client[remote._ref.engine_id]
-        def remote_array(object_id):
-            return Ref(np.array(engine[object_id]))
-        return RemoteArray(dv.apply_sync(remote_array, remote._ref.object_id))
+        return call(np.array, remote, prefer_local=False)
 
 
 def concatenate(tup, axis=0):

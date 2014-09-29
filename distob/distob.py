@@ -57,20 +57,24 @@ class DistobValueError(Error):
 
 
 class DistobClusterError(Error):
-    """Thrown if there is a problem using the cluster that we can't fix"""
     pass
+
+
+# Cluster-wide unique identifier for an object:
+Id = collections.namedtuple('Id', 'instance engine')
 
 
 class Ref(object):
     """Reference to a (possibly remote) object.
 
-    a Ref can exist on the same IPython engine that owns the object, or on 
+    a Ref can exist on the same IPython engine that holds the object, or on 
     any python instance that has an ObjectHub (such as the IPython client)
 
     Attributes:
-      engine_id (int): The IPython engine number where the object is held. 
-        -1 means that the object is held on the IPython client.
-      object_id (str): An object id string that is unique cluster-wide.
+      id (Id): An cluster-wide unique identifier for the object.
+        id.instance is a number unique within a particular engine.
+        id.engine is the IPython engine number where the object is held, or a
+        negative number if it is held on an IPython client.
       type: type of the remote object
       metadata (tuple, optional): brief extra information about the object 
         may be defined by specific Remote* classes, to help set up access.
@@ -79,64 +83,63 @@ class Ref(object):
         if isinstance(obj, Remote):
             obj = obj._ref
         if isinstance(obj, Ref):
-            self.engine_id = obj.engine_id
-            self.object_id = obj.object_id
+            self.id = obj.id
             self.type = obj.type
             self.metadata = obj.metadata
-            distob.engine.incref(self.object_id)
+            distob.engine.incref(self.id)
         else:
-            self.engine_id = distob.engine.id
             self.type = type(obj)
             if self.type in distob.engine.proxy_types:
-                self.metadata = \
-                        distob.engine.proxy_types[self.type].__pmetadata__(obj)
+                ptype = distob.engine.proxy_types[self.type]
+                self.metadata = ptype.__pmetadata__(obj)
             else:
                 self.metadata = None
-            self.object_id = '%s:%s@e%d' % (
-                self.type.__name__, hex(id(obj)), self.engine_id)
-            distob.engine[self.object_id] = obj
+            self.id = Id(id(obj), distob.engine.eid)
+            distob.engine[self.id] = obj
 
     def __getstate__(self):
         # pickled or copied Ref is included in refcount
-        distob.engine.incref(self.object_id)
-        return (self.engine_id, self.object_id, self.type.__name__,
-                self.type.__module__, self.metadata)
+        distob.engine.incref(self.id)
+        return (self.id, self.type.__name__, self.type.__module__, 
+                self.metadata)
 
     def __setstate__(self, state):
-        self.engine_id,self.object_id,typename,modname,self.metadata = state
+        self.id, typename, modname, self.metadata = state
         module = importlib.import_module(modname)
         self.type = getattr(module, typename)
 
     def __del__(self):
-        distob.engine.decref(self.object_id)
+        distob.engine.decref(self.id)
 
     def __repr__(self):
-        return u'<Ref to %s>' % self.object_id
+        id = self.id
+        typename = self.type.__name__
+        return u'<Ref to %s:%s@e%d>' % (typename, id.instance, id.engine)
 
 
 class ObjectEngine(dict):
     """A dict holding the distributed objects of a single IPython engine.
 
     It maintains cluster-wide reference counts of the objects it holds.
-    There is one global instance on each engine.
+    There is one global instance (distob.engine) on each IPython engine.
 
     For each dict entry,
-    Key is an object id string (unique cluster-wide)
+    Key is an object Id (unique cluster-wide)
     Value is the actual object that is to be accessed remotely.
 
     Attributes:
-      id (int): IPython engine id number of this engine. -1 means this is
-        an IPython client, rather than an engine.
-      refcounts (dict): Key is an object id string (for an object held on
-        this engine). Value is the cluster-wide count of how many Ref
-        instances exist pointing to that object.
+      eid (int): IPython engine id number of this engine. A negative number 
+        means this is an IPython client, rather than an engine.
+      refcounts (dict): Key is an object Id (for an object held on this engine)
+        Value is the cluster-wide count of how many Ref instances exist 
+        pointing to that object.
       proxy_types (dict): When an object's methods are called remotely, some
         return types should be returned by proxy instead of returning a 
         full object. This dict holds mappings {real_type: proxy_type} for 
         these types.
     """
     def __init__(self, engine_id):
-        self.id = engine_id 
+        self.eid = engine_id 
         self.refcounts = dict()
         self.proxy_types = dict()
         super(ObjectEngine, self).__init__()
@@ -179,11 +182,11 @@ class ObjectEngine(dict):
 
     def __repr__(self):
         return '<%s instance on engine %d>:\n%s' % (
-            self.__class__.__name__, self.id, repr(self.keys()))
+            self.__class__.__name__, self.eid, repr(self.keys()))
 
     def _repr_pretty_(self, p, cycle):
         return '<%s instance on engine %d>:\n%s' % (
-            self.__class__.__name__, self.id, p.pretty(self.keys()))
+            self.__class__.__name__, self.eid, p.pretty(self.keys()))
 
 
 # TODO put this back inside ObjectHub after dill issue #58 is resolved.
@@ -194,17 +197,17 @@ def _remote_reg_proxy_type(real_t, proxy_t):
 class ObjectHub(ObjectEngine):
     """A dict providing references to all distributed objects across the cluster
 
-    Key is an object id string (unique cluster-wide)
+    Key is an object Id (unique cluster-wide)
     Value is the actual object (if local) or a Ref to the object (if remote)
 
     Operations supported are get and delete.
 
     Attributes:
-      id (int): IPython engine id number of this engine. -1 means this is
-        an IPython client, rather than an engine.
-      refcounts (dict): Key is an object id string (for an object held on
-        this engine). Value is the cluster-wide count of how many Ref
-        instances exist pointing to that object.
+      eid (int): IPython engine id number of this engine. A negative number 
+        means this is an IPython client, rather than an engine.
+      refcounts (dict): Key is an Id (for an object held on this engine). 
+        Value is the cluster-wide count of how many Ref instances exist
+        pointing to that object.
       proxy_types (dict): When an object's methods are called remotely, some
         return types should be returned by proxy instead of returning a 
         full object. This dict holds mappings {real_type: proxy_type} for 
@@ -215,7 +218,8 @@ class ObjectHub(ObjectEngine):
     def __init__(self, engine_id, client):
         """Make an ObjectHub.
         Args:
-          engine_id: -1 if this hub is on the client, otherwise this engine's id
+          engine_id: IPython engine id number where this Hub is located, or a
+            negative number if it is on an IPython client.
           client: IPython.parallel.client
         """
         self._client = client
@@ -248,43 +252,48 @@ class ObjectHub(ObjectEngine):
         pass
 
     def incref(self, key):
-        engine_id = int(key[(key.rindex('@e')+2):])
-        if engine_id is self.id:
+        if key.engine is self.eid:
             super(ObjectHub, self).incref(key)
         else:
-            self._dv.execute('distob.engine.incref("%s")' % key, 
-                             targets=engine_id)
+            def _remote_incref(key):
+               distob.engine.incref(key) 
+            self._dv.targets = key.engine
+            self._dv.apply_sync(_remote_incref, key)
+            self._dv.targets = 'all'
 
     def decref(self, key):
-        engine_id = int(key[(key.rindex('@e')+2):])
-        if engine_id is self.id:
+        if key.engine is self.eid:
             super(ObjectHub, self).decref(key)
         else:
-            self._dv.execute('distob.engine.decref("%s")' % key, 
-                             targets=engine_id)
+            def _remote_decref(key):
+               distob.engine.decref(key) 
+            self._dv.targets = key.engine
+            self._dv.apply_sync(_remote_decref, key)
+            self._dv.targets = 'all'
 
     def __delitem__(self, key):
-        engine_id = int(key[(key.rindex('@e')+2):])
-        if engine_id is self.id:
+        if key.engine is self.eid:
             super(ObjectHub, self).__delitem__(key)
         else:
-            self._dv.execute('del distob.engine["%s"]' % key, targets=engine_id)
+            def _remote_delitem(key):
+               del distob.engine[key]
+            self._dv.targets = key.engine
+            self._dv.apply_sync(_remote_delitem, key)
+            self._dv.targets = 'all'
 
     def __getitem__(self, key):
-        engine_id = int(key[(key.rindex('@e')+2):])
-        if engine_id is self.id:
+        if key.engine is self.eid:
             return super(ObjectHub, self).__getitem__(key)
         else:
-            def fetch_object(object_id):
-                return Ref(distob.engine[object_id])
-            self._dv.targets = engine_id
+            def fetch_object(id):
+                return Ref(distob.engine[id])
+            self._dv.targets = key.engine
             res = self._dv.apply_sync(fetch_object, key)
             self._dv.targets = 'all'
             return res
 
     def __setitem__(self, key, value):
-        engine_id = int(key[(key.rindex('@e')+2):])
-        if engine_id is self.id:
+        if key.engine is self.eid:
             super(ObjectHub, self).__setitem__(key, value)
         else:
             raise Error('Setting remote objects via ObjectHub not implemented')
@@ -292,7 +301,8 @@ class ObjectHub(ObjectEngine):
     def keys(self):
         local_keys = super(ObjectHub, self).keys()
         def fetch_keys():
-            return distob.engine.keys()
+            from distob import engine
+            return engine.keys()
         ar = self._dv.apply_async(fetch_keys)
         self._dv.wait(ar)
         remote_keys = [key for sublist in ar.r for key in sublist]
@@ -300,6 +310,7 @@ class ObjectHub(ObjectEngine):
 
 
 def _remote_setup_engine(engine_id):
+    """(Executed on remote engine) creates an ObjectEngine instance """
     if distob.engine is None:
         distob.engine = distob.ObjectEngine(engine_id)
     # TODO these imports should be unnecessary with improved deserialization
@@ -326,16 +337,16 @@ def _setup_engines(client=None):
                 u"""Could not connect to an IPython parallel cluster. Make
                  sure a cluster is started (e.g. to use the CPUs of a
                  single computer, can type 'ipcluster start')""")
-    ids = client.ids
-    if not ids:
+    eids = client.ids
+    if not eids:
         raise DistobClusterError(u'No IPython compute engines are available')
-    dv = client[ids]
+    dv = client[eids]
     dv.use_dill()
     with dv.sync_imports(quiet=True):
         import distob
     # create global ObjectEngine distob.engine on each engine
     ars = []
-    for i in ids:
+    for i in eids:
         dv.targets = i
         ars.append(dv.apply_async(_remote_setup_engine, i))
     dv.wait(ars)
@@ -345,6 +356,294 @@ def _setup_engines(client=None):
     # create global ObjectHub distob.engine on the client host
     if distob.engine is None:
         distob.engine = ObjectHub(-1, client)
+
+
+def _process_args(args, kwargs, prefer_local=True):
+    """Select local or remote execution and prepare arguments accordingly.
+    Assumes any remote args have already been moved to a common engine.
+
+    Local execution will be chosen if:
+    - all args are ordinary objects or Remote instances on the local engine; or
+    - the local cache of all remote args is current, and prefer_local is True.
+    Otherwise, remote execution will be chosen. 
+
+    For remote execution, replaces any remote arg with its Id.
+    For local execution, replaces any remote arg with its locally cached object
+
+    Args:
+      args (list)
+      kwargs (dict)
+      prefer_local (bool, optional): Whether cached local results are prefered
+        if available, instead of returning Remote objects. Default is True.
+    """
+    this_engine = distob.engine.eid
+    local_args = []
+    remote_args = []
+    execloc = this_engine  # the chosen engine id for execution of the call
+    for a in args:
+        id = None
+        if isinstance(a, Remote):
+            id = a._ref.id
+        elif isinstance(a, Ref):
+            id = a.id
+        elif isinstance(a, Id):
+            id = a
+        if id is not None:
+            if id.engine is this_engine:
+                local_args.append(distob.engine[id])
+                remote_args.append(distob.engine[id])
+            else:
+                if (prefer_local and isinstance(a, Remote) and 
+                        a._obcache_current):
+                    local_args.append(a._obcache)
+                    remote_args.append(id)
+                else:
+                    # will choose remote execution
+                    if execloc is not this_engine and id.engine is not execloc:
+                        raise DistobValueError(
+                            'two remote arguments are from different engines')
+                    else:
+                        execloc = id.engine
+                        local_args.append(None)
+                        remote_args.append(id)
+        else:
+            # argument is an ordinary object
+            local_args.append(a)
+            remote_args.append(a)
+    local_kwargs = dict()
+    remote_kwargs = dict()
+    for k, a in kwargs.items():
+        id = None
+        if isinstance(a, Remote):
+            id = a._ref.id
+        elif isinstance(a, Ref):
+            id = a.id
+        elif isinstance(a, Id):
+            id = a
+        if id is not None:
+            if id.engine is this_engine:
+                local_kwargs[k] = distob.engine[id]
+                remote_kwargs[k] = distob.engine[id]
+            else:
+                if (prefer_local and isinstance(a, Remote) and
+                        a._obcache_current):
+                    local_kwargs[k] = a._obcache
+                    remote_kwargs[k] = id
+                else:
+                    # will choose remote execution
+                    if execloc is not this_engine and id.engine is not execloc:
+                        raise DistobValueError(
+                            'two remote arguments are from different engines')
+                    else:
+                        execloc = id.engine
+                        local_kwargs[k] = None
+                        remote_kwargs[k] = id
+        else:
+            # argument is an ordinary object 
+            local_kwargs[k] = a
+            remote_kwargs[k] = a
+    if execloc is this_engine:
+        return execloc, tuple(local_args), local_kwargs
+    else:
+        return execloc, tuple(remote_args), remote_kwargs
+
+
+def _remote_call(f, *args, **kwargs):
+    """(Executed on remote engine) convert Ids to real objects, call f """
+    args = [distob.engine[a] if isinstance(a, Id) else a for a in args]
+    for k, a in kwargs.items():
+        if isinstance(a, Id):
+            kwargs[k] = distob.engine[a]
+    result = f(*args, **kwargs)
+    if type(result) in distob.engine.proxy_types:
+        return Ref(result)
+    else:
+        return result
+
+
+def _uncached_call(execloc, f, *args, **kwargs):
+    dv = distob.engine._dv
+    dv.targets = execloc
+    ar = dv.apply_async(_remote_call, f, *args, **kwargs)
+    dv.targets = 'all'
+    return ar
+
+
+_call_cache = _pylru.lrucache(1000)
+
+
+def call(f, *args, **kwargs):
+    """Execute f on the arguments, either locally or remotely as appropriate.
+    If there are multiple remote arguments, they must be on the same engine.
+    
+    kwargs:
+      prefer_local (bool, optional): Whether to return cached local results if
+        available, in preference to returning Remote objects. Default is True.
+      block (bool, optional): Whether remote calls should be synchronous.
+        If False, returned results may be AsyncResults and should be converted
+        by the caller using convert_result() before use. Default is True.
+    """
+    this_engine = distob.engine.eid
+    prefer_local = kwargs.pop('prefer_local', True)
+    block = kwargs.pop('block', True)
+    execloc, args, kwargs = _process_args(args, kwargs, prefer_local)
+    if execloc is this_engine:
+        r = f(*args, **kwargs)
+    else:
+        if prefer_local:
+            try:
+                kwtuple = tuple((k, kwargs[k]) for k in sorted(kwargs.keys()))
+                key = (f, args, kwtuple)
+                r = _call_cache[key]
+            except TypeError as te:
+                if te.args[0][:10] == 'unhashable':
+                    #print("unhashable. won't be able to cache")
+                    r = _uncached_call(execloc, f, *args, **kwargs)
+                else:
+                    raise
+            except KeyError:
+                r = _uncached_call(execloc, f, *args, **kwargs)
+                if block:
+                    _call_cache[key] = r.r
+        else:
+            r = _uncached_call(execloc, f, *args, **kwargs)
+    if block:
+        return convert_result(r)
+    else:
+        return r
+
+
+def convert_result(r):
+    """Waits for and converts any AsyncResult. Converts any Ref into a Remote.
+    Args:
+      r: can be either an ordinary object, parallel.AsyncResult, or a Ref
+    Returns: 
+      either an ordinary object or a Remote instance"""
+    if isinstance(r, parallel.AsyncResult):
+        r = r.r
+    if isinstance(r, Ref):
+        RemoteClass = distob.engine.proxy_types[r.type]
+        r = RemoteClass(r)
+    return r
+
+
+def _remote_methodcall(id, method_name, *args, **kwargs):
+    """(Executed on remote engine) convert Ids to real objects, call method """
+    obj = distob.engine[id]
+    args = [distob.engine[a] if isinstance(a, Id) else a for a in args]
+    for k, v in kwargs.items():
+        if isinstance(v, Id):
+            kwargs[k] = distob.engine[v]
+    result = getattr(obj, method_name)(*args, **kwargs)
+    if type(result) in distob.engine.proxy_types:
+        return Ref(result)
+    else:
+        return result
+
+
+def _uncached_methodcall(execloc, id, method_name, *args, **kwargs):
+    dv = distob.engine._dv
+    dv.targets = execloc
+    ar = dv.apply_async(_remote_methodcall, id, method_name, *args, **kwargs)
+    dv.targets = 'all'
+    return ar
+
+
+def methodcall(obj, method_name, *args, **kwargs):
+    """Call a method of `obj`, either locally or remotely as appropriate.
+    obj may be an ordinary object, or a Remote object (or Ref or object Id)
+    If there are multiple remote arguments, they must be on the same engine.
+    
+    kwargs:
+      prefer_local (bool, optional): Whether to return cached local results if
+        available, in preference to returning Remote objects. Default is True.
+      block (bool, optional): Whether remote calls should be synchronous.
+        If False, returned results may be AsyncResults and should be converted
+        by the caller using convert_result() before use. Default is True.
+    """
+    this_engine = distob.engine.eid
+    args = [obj] + list(args)
+    prefer_local = kwargs.pop('prefer_local', True)
+    block = kwargs.pop('block', True)
+    execloc, args, kwargs = _process_args(args, kwargs, prefer_local)
+    if execloc is this_engine:
+        r = getattr(args[0], method_name)(*args[1:], **kwargs)
+    else:
+        if prefer_local:
+            try:
+                kwtuple = tuple((k, kwargs[k]) for k in sorted(kwargs.keys()))
+                key = (args[0], method_name, args, kwtuple)
+                r = _call_cache[key]
+            except TypeError as te:
+                if te.args[0][:10] == 'unhashable':
+                    #print("unhashable. won't be able to cache")
+                    r = _uncached_methodcall(execloc, args[0], method_name,
+                                             *args[1:], **kwargs)
+                else:
+                    raise
+            except KeyError:
+                r = _uncached_methodcall(execloc, args[0], method_name,
+                                         *args[1:], **kwargs)
+                if block:
+                    _call_cache[key] = r.r
+        else:
+            r = _uncached_methodcall(execloc, args[0], method_name,
+                                     *args[1:], **kwargs)
+    if block:
+        return convert_result(r)
+    else:
+        return r
+
+
+def _make_proxy_method(method_name, doc=None):
+    def method(self, *args, **kwargs):
+        return methodcall(self, method_name, *args, **kwargs)
+    method.__doc__ = doc
+    method.__name__ = method_name
+    return method
+
+
+def _make_proxy_property(attrib_name, doc=None):
+    def getter(self):
+        return methodcall(self, '__getattribute__', attrib_name)
+    # TODO: implement fset and fdel (requires writeback cache and locking)
+    prop = property(fget=getter, doc=doc)
+    return prop
+
+
+def _scan_instance(obj, include_underscore, exclude):
+    """(Executed on remote or local engine) Examines an object and returns info
+    about any instance-specific methods or attributes.
+    (For example, any attributes that were set by __init__() )
+
+    By default, methods or attributes starting with an underscore are ignored.
+
+    Args:
+      obj (object): the object to scan. must be on this local engine.
+      include_underscore (sequence of str): names of any methods or attributes
+        that should be included even though they start with an underscore.
+      exclude (sequence of str): names of any methods or attributes that should
+        not be reported.
+    """
+    from sys import getsizeof
+    method_info = []
+    attributes_info = []
+    if hasattr(obj, '__dict__'):
+        for name in obj.__dict__:
+            if (name not in exclude and 
+                (name[0] != '_' or 
+                 include_underscore is True or
+                 name in include_underscore)):
+                f = obj.__dict__[name]
+                if hasattr(f, '__doc__'):
+                    doc = f.__doc__
+                else:
+                    doc = None
+                if callable(f) and not isinstance(f, type):
+                    method_info.append((name, doc))
+                else:
+                    attributes_info.append((name, doc))
+    return (method_info, attributes_info, getsizeof(obj))
 
 
 class Remote(object):
@@ -357,8 +656,8 @@ class Remote(object):
     exactly like instances of the controlled class, then also inherit from 
     the controlled class as the second base:
 
-        @proxy_methods(Tree)
-        class RemoteTree(Remote, Tree)
+      @proxy_methods(Tree)
+      class RemoteTree(Remote, Tree)
 
     Use the decorator @proxy_methods() to register the new Remote proxy class
     and to specify which methods/attributes of the existing class should be
@@ -386,170 +685,42 @@ class Remote(object):
             _setup_engines()
         if isinstance(obj, Ref):
             self._ref = obj
-            self.is_local = (self._ref.engine_id is distob.engine.id)
+            self.is_local = (self._ref.id.engine is distob.engine.eid)
         else:
             self._ref = Ref(obj)
             self.is_local = True
         if self.is_local:
             self._dv = None
-            self._obcache = distob.engine[self._ref.object_id]
+            self._obcache = distob.engine[self._ref.id]
             self._obcache_current = True
         else:
-            self._dv = distob.engine._client[self._ref.engine_id]
+            self._dv = distob.engine._client[self._ref.id.engine]
             self._dv.use_dill()
             self._obcache = None
             self._obcache_current = False
-        self._id = self._ref.object_id
-        self.cache = True # preference setting: whether to cache remote results
+        self._id = self._ref.id
+        # preference setting: whether to give cached local results if available
+        self.prefer_local = True 
         #Add proxy controllers for any instance-specific methods/attributes:
-        (instance_methods, instance_attribs, size) = self._scan_instance()
-        self.__engine_affinity__ = (self._ref.engine_id, size)
+        instance_methods, instance_attribs, size = call(
+                _scan_instance, self, self.__class__._include_underscore,
+                self.__class__._exclude, prefer_local=False)
         for name, doc in instance_methods:
-            def make_proxy_method(method_name, doc):
-                def method(self, *args, **kwargs):
-                    if self.cache:
-                        if self._obcache_current:
-                            return apply(getattr(self._obcache, method_name),
-                                         *args, **kwargs)
-                        else:
-                            return cls._try_cached_apply(self, method_name,
-                                                         *args, **kwargs)
-                    else:
-                            return cls._apply(self, method_name, 
-                                              *args, **kwargs)
-                method.__doc__ = doc
-                method.__name__ = method_name
-                #return types.MethodType(method, None, cls)
-                return method
-            setattr(self, name, make_proxy_method(name, doc))
-        for name in instance_attribs:
-            def make_property(attrib_name):
-                # TODO: implement fset and fdel (requires writeback cache)
-                def getter(self):
-                    if self.cache:
-                        if self._obcache_current:
-                            return getattr(self._obcache, attrib_name)
-                        else:
-                            return self._cached_apply('__getattribute__', 
-                                                      attrib_name) 
-                    else:
-                        return self._apply('__getattribute__', attrib_name)
-                prop = property(fget=getter)
-                return prop
-            setattr(self.__class__, name, make_property(name))
-
-    @classmethod
-    def _local_scan_instance(cls, object_id, include_underscore, exclude):
-        from sys import getsizeof
-        method_info = []
-        attributes = []
-        obj = distob.engine[object_id]
-        if hasattr(obj, '__dict__'):
-            for name in obj.__dict__:
-                if (name not in exclude and 
-                    (name[0] != '_' or 
-                     include_underscore is True or
-                     name in include_underscore)):
-                    f = obj.__dict__[name]
-                    if callable(f) and not isinstance(f, type):
-                        method_info.append((name, f.__doc__))
-                    else:
-                        attributes.append(name)
-        return (method_info, attributes, getsizeof(obj))
-
-    def _scan_instance(self):
-        """get information on instance-methods/attributes of the object"""
-        if self.is_local:
-            return Remote._local_scan_instance(
-                    self._ref.object_id, 
-                    self.__class__._include_underscore, 
-                    self.__class__._exclude)
-        else:
-            return self._dv.apply_sync(Remote._local_scan_instance,
-                                       self._ref.object_id,
-                                       self.__class__._include_underscore,
-                                       self.__class__._exclude)
-
-    def _apply(self, method_name, *args, **kwargs):
-        """Call a method on the remote object without caching."""
-        #print('in _apply: type=%s, method_name==%s, args==%s, kwargs==%s' % (
-        #        type(self), method_name, args, kwargs))
-        def remote_call_method(object_id, method_name, *args, **kwargs):
-            r = getattr(distob.engine[object_id], method_name)(*args, **kwargs)
-            if type(r) in distob.engine.proxy_types:
-                return Ref(r)
-            else:
-                return r
-        if self._ref.engine_id is distob.engine.id:
-            r = getattr(distob.engine[self._id], method_name)(*args, **kwargs)
-        elif self.cache and self._obcache_current:
-            r = getattr(self._obcache, method_name)(*args, **kwargs)
-        else:
-            r = self._dv.apply_sync(remote_call_method, self._id, 
-                                    method_name, *args, **kwargs)
-        if isinstance(r, Ref):
-            RemoteClass = distob.engine.proxy_types[r.type]
-            return RemoteClass(r)
-        else:
-            return r
-
-    @_pylru.lrudecorator(1000)
-    def _cached_apply(self, method_name, *args, **kwargs):
-        #print('cache miss. self:%s(%s); method:%s; args:%s; kwargs:%s' % (
-        #    hex(id(self)), self._ref.object_id, method_name, 
-        #    repr(args), repr(kwargs)))
-        return self._apply(method_name, *args, **kwargs)
-
-    def _try_cached_apply(self, method_name, *args, **kwargs):
-        """Call a method on the remote object. Cache results if args hashable.
-        Args:
-          method_name (str): name of the remote method to call 
-          *args, **kwargs: arguments to pass to the remote method
-        Returns:
-          ``<remote_object>.<method_name>(*args, **kwargs)``
-          If the output is of a type that should be proxied, returns 
-          a ``Remote*`` proxy object instead of the real object.
-        """
-        #print('try cached: self:%s(%s); method:%s; args:%s; kwargs:%s' % (
-        #   hex(id(self)), self._ref.object_id, method_name, 
-        #   repr(args), repr(kwargs)))
-        #
-        #For some reason immutable slice objects are not hashable in python.
-        #TODO workaround this by recursively replacing any slices in dict key.
-        try:
-            return self._cached_apply(method_name, *args, **kwargs)
-        except TypeError as te:
-            if te.args[0][:15] == 'unhashable type':
-                #print("unhashable. won't be able to cache")
-                return self._apply(method_name, *args, **kwargs)
-            else:
-                raise
-
-    def _apply_async(self, method_name, *args, **kwargs):
-        """Call a method on the remote object without caching.
-        Returns: 
-          ipython.parallel.AsyncResult: async output of the remote method
-        """
-        def remote_call_method(object_id, method_name, *args, **kwargs):
-            r = getattr(distob.engine[object_id], method_name)(*args, **kwargs)
-            if type(r) in distob.engine.proxy_types:
-                return Ref(r)
-            else:
-                return r
-        if self._ref.engine_id is distob.engine_id:
-            raise Error("currently can't use _apply_async if object is local")
-        ar = self._dv.apply_async(remote_call_method, self._id, 
-                                  method_name, *args, **kwargs)
-        return ar
+            setattr(self, name, _make_proxy_method(name, doc))
+        for name, doc in instance_attribs:
+            setattr(self.__class__, name, _make_proxy_property(name, doc))
+        self.__engine_affinity__ = (self._ref.id.engine, size)
 
     def _fetch(self):
         """forces update of a local cached copy of the real object
         (regardless of the preference setting self.cache)"""
         if not self.is_local and not self._obcache_current:
-            #print('fetching data from %s' % self._ref.object_id)
-            self._obcache = self._dv['distob.engine["%s"]' % self._id]
+            #print('fetching data from %s' % self._ref.id)
+            def _remote_fetch(id):
+                return distob.engine[id]
+            self._obcache = self._dv.apply_sync(_remote_fetch, self._id)
             self._obcache_current = True
-            self.__engine_affinity__ = (distob.engine.id, 
+            self.__engine_affinity__ = (distob.engine.eid, 
                                         self.__engine_affinity__[1])
 
     def __ob(self):
@@ -587,8 +758,8 @@ def proxy_methods(base, include_underscore=None, exclude=None, supers=True):
 
     Example:
 
-        @proxy_methods(Tree)
-        class RemoteTree(Remote, Tree)
+      @proxy_methods(Tree)
+      class RemoteTree(Remote, Tree)
 
     The decorator registers the new proxy class and specifies which methods
     and attributes of class `base` should be proxied via a remote call to
@@ -651,35 +822,6 @@ def proxy_methods(base, include_underscore=None, exclude=None, supers=True):
             proxied_classes = (base,)
         for c in proxied_classes:
             for name in c.__dict__:
-                def mk_proxy_method(method_name, doc):
-                    def method(self, *args, **kwargs):
-                        if self.cache:
-                            if self._obcache_current:
-                                return getattr(self._obcache, method_name)(
-                                        *args, **kwargs)
-                            else:
-                                return newcls._try_cached_apply(
-                                        self, method_name, *args, **kwargs)
-                        else:
-                            return newcls._apply(
-                                    self, method_name, *args, **kwargs)
-                    method.__doc__ = doc
-                    method.__name__ = method_name
-                    #return types.MethodType(method, None, newcls)
-                    return method
-                def mk_property(attrib_name):
-                    # TODO: implement fset and fdel (requires writeback cache)
-                    def getter(self):
-                        if self.cache:
-                            if self._obcache_current:
-                                return getattr(self._obcache, attrib_name)
-                            else:
-                                return self._cached_apply('__getattribute__',
-                                                          attrib_name)
-                        else:
-                            return self._apply('__getattribute__', attrib_name)
-                    prop = property(fget=getter)
-                    return prop
                 #respect MRO: proxy an attribute only if it is not overridden
                 if (name not in newcls.__dict__ and
                         all(name not in b.__dict__ 
@@ -689,13 +831,17 @@ def proxy_methods(base, include_underscore=None, exclude=None, supers=True):
                          newcls._include_underscore is True or
                          name in newcls._include_underscore)):
                     f = c.__dict__[name]
-                    if callable(f) and not isinstance(f, type):
-                        setattr(newcls, name, mk_proxy_method(name, f.__doc__))
+                    if hasattr(f, '__doc__'):
+                        doc = f.__doc__
                     else:
-                        setattr(newcls, name, mk_property(name))
-        #newcls.__module__ = '__main__' # cause dill to pickle it whole
-        #import __main__
-        #__main__.__dict__[newcls.__name__] = newcls # for dill..
+                        doc = None
+                    if callable(f) and not isinstance(f, type):
+                        setattr(newcls, name, _make_proxy_method(name, doc))
+                    else:
+                        setattr(newcls, name, _make_proxy_property(name, doc))
+        newcls.__module__ = '__main__' # cause dill to pickle it whole
+        import __main__
+        __main__.__dict__[newcls.__name__] = newcls # for dill..
         ObjectHub.register_proxy_type(base, newcls)
         return newcls
     return rebuild_class
@@ -751,7 +897,9 @@ def _ars_to_proxies(ars):
     Returns:
       Remote* proxy object (or list of them)
     """
-    if isinstance(ars, Remote) or ars is None:
+    if (isinstance(ars, Remote) or
+            isinstance(ars, numbers.Number) or
+            ars is None):
         return ars
     elif isinstance(ars, collections.Sequence):
         res = []
@@ -759,7 +907,6 @@ def _ars_to_proxies(ars):
             res.append(_ars_to_proxies(ars[i]))
         return res
     elif isinstance(ars, parallel.AsyncResult):
-        ars.wait()
         ref = ars.r
         ObClass = ref.type
         if ObClass in distob.engine.proxy_types:
@@ -894,20 +1041,8 @@ def vectorize(f):
         # user classes can customize how to vectorize a function:
         if hasattr(obj, '__distob_vectorize__'):
             return obj.__distob_vectorize__(f)(obj, *args, **kwargs)
-        def remote_f(object_id, *args, **kwargs):
-            result = f(distob.engine[object_id], *args, **kwargs)
-            if type(result) in distob.engine.proxy_types:
-                return Ref(result)
-            else:
-                return result
         if isinstance(obj, Remote):
-            dv = distob.engine._client[obj._ref.engine_id]
-            r = dv.apply_sync(remote_f, obj._ref.object_id, *args, **kwargs)
-            if isinstance(r, Ref):
-                RemoteClass = distob.engine.proxy_types[r.type]
-                return RemoteClass(r)
-            else:
-                return r
+            return call(f, obj, *args, **kwargs)
         elif distob._have_numpy and (isinstance(obj, np.ndarray) or
                  hasattr(type(obj), '__array_interface__')):
             distarray = scatter(obj, axis=-1)
@@ -915,23 +1050,13 @@ def vectorize(f):
         elif isinstance(obj, collections.Sequence):
             inputs = scatter(obj)
             dv = distob.engine._client[:]
+            kwargs = kwargs.copy()
+            kwargs['block'] = False
             results = []
             for obj in inputs:
-                if isinstance(obj, Remote):
-                    dv.targets = obj._ref.engine_id
-                    results.append(dv.apply_async(remote_f, obj._ref.object_id,
-                                                  *args, **kwargs))
-                else:
-                    results.append(f(obj, *args, **kwargs))
+                results.append(call(f, obj, *args, **kwargs))
             for i in range(len(results)):
-                ar = results[i]
-                if isinstance(ar, parallel.AsyncResult):
-                    ar.wait()
-                    results[i] = ar.r
-                if isinstance(results[i], Ref):
-                    ref = results[i]
-                    RemoteClass = distob.engine.proxy_types[ref.type]
-                    results[i] = RemoteClass(ref)
+                results[i] = convert_result(results[i])
             return results
     if hasattr(f, '__name__'):
         vf.__name__ = 'v' + f.__name__
@@ -955,25 +1080,15 @@ def apply(f, obj, *args, **kwargs):
 
 
 def call_all(sequence, method_name, *args, **kwargs):
-    """Call a method on each element of the sequence, in parallel.
+    """Call a method on each element of a sequence, in parallel.
     Returns:
       list of results
     """
-    # dispatch method calls asynchronously
+    kwargs = kwargs.copy()
+    kwargs['block'] = False
     results = []
     for obj in sequence:
-        if isinstance(obj, Remote):
-            results.append(obj._apply_async(method_name, *args, **kwargs))
-        else: 
-            results.append(getattr(obj, method_name)(*args, **kwargs))
-    # now wait for all results before returning
+        results.append(methodcall(obj, method_name, *args, **kwargs))
     for i in range(len(results)):
-        obj = results[i]
-        if isinstance(obj, parallel.AsyncResult):
-            obj.wait()
-            results[i] = obj.r
-        if isinstance(results[i], Ref):
-            ref = results[i]
-            RemoteClass = distob.engine.proxy_types[ref.type]
-            results[i] = RemoteClass(ref)
+        results[i] = convert_result(results[i])
     return results
