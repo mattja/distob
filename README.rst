@@ -72,15 +72,11 @@ the client)
 TODO
 ----
 
--  Blocking/non-blocking proxy methods
-
 -  Allow assignment to slices of remote arrays
 
 -  Implement caching of remote array slice operations
 
 -  Auto-creation of proxy classes at runtime (depends uqfoundation/dill#58)
-
--  Instead of caching all methods, allow specifying which ones.
 
 -  For ufunc execution, still need to implement ``reduce``, ``accumulate``, ``reduceat``, ``outer``, ``at`` methods.
 
