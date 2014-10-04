@@ -12,7 +12,7 @@ from .distob import (scatter, gather, vectorize, apply, call_all,
 
 engine = None
 
-__version__ = '0.2.0'
+__version__ = '0.2.1-dev'
 
 if _have_numpy:
     from .arrays import (RemoteArray, DistArray, transpose, rollaxis,
