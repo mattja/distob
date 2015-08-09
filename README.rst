@@ -22,7 +22,7 @@ A numpy array can also be scattered across the cluster, along a particular
 axis. Operations on the array can then be automatically done in parallel 
 (either using ufuncs, or by using ``vectorize()`` below)
 
-Note: numpy 1.10.0 or later (not yet released!) is required for full functionality with distributed array arithmetic and ufuncs. You can get a development snapshot of numpy here: https://github.com/numpy/numpy/archive/master.zip
+Note: numpy 1.11.0 or later (not yet released!) is required for full functionality with distributed array arithmetic and ufuncs. You can get a development snapshot of numpy here: https://github.com/numpy/numpy/archive/master.zip
 
 Distob is an object layer built on top of IPython.parallel, so it will
 make use of your default IPython parallel profile. This allows different
@@ -43,7 +43,7 @@ distributed numpy arrays
 | 
 | Arithmetic operations can freely mix ordinary arrays with the new array types.
 | Normal numpy ufuncs can also be used on the distributed arrays.
-| Arithmetic and ufunc computations will automatically be routed to an engine, or executed in parallel on several engines, depending on where the data is. (needs numpy>=1.10.0)
+| Arithmetic and ufunc computations will automatically be routed to an engine, or executed in parallel on several engines, depending on where the data is. (needs numpy>=1.11.0)
 | 
 | ``concatenate``, ``vstack``, ``hstack``, ``dstack``, ``expand_dims``, ``transpose``, ``rollaxis``, ``split``, ``vsplit``, ``hsplit``, ``dsplit``, ``broadcast_arrays``:
 | These work like the numpy functions of the same name. But these can be used with a mix of ordinary ndarrays, RemoteArrays and DistArrays, performing array structural changes while keeping the actual data distributed across multiple engines.
@@ -71,6 +71,8 @@ the client)
 
 TODO
 ----
+
+-  Make distributed arrays scale: The current version splits the distributed axis finely into pieces of length 1. This scales badly if the length of that axis is much greater than the number of CPUs n. Instead split into n larger chunks.
 
 -  Allow assignment to slices of remote arrays
 

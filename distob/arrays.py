@@ -111,13 +111,13 @@ class RemoteArray(Remote, object):
 
     def __array_prepare__(self, out_arr, context=None):
         """Fetch underlying data to user's computer and apply ufunc locally.
-        Only used as a fallback, for numpy versions < 1.10 which lack 
+        Only used as a fallback, for numpy versions < 1.11 which lack 
         support for the __numpy_ufunc__ mechanism. 
         """
         #print('In RemoteArray __array_prepare__. context=%s' % repr(context))
-        if list(map(int, np.version.short_version.split('.'))) < [1,10,0]:
+        if list(map(int, np.version.short_version.split('.'))) < [1,11,0]:
             msg = (u'\nNote: Distob distributed array arithmetic and ufunc ' +
-                    'support requires\nnumpy 1.10.0 or later (not yet ' +
+                    'support requires\nnumpy 1.11.0 or later (not yet ' +
                     'released!) Can get the latest numpy here: \n' +
                     'https://github.com/numpy/numpy/archive/master.zip\n' +
                     'Otherwise, will bring data back to the client to ' +
@@ -125,7 +125,7 @@ class RemoteArray(Remote, object):
             _brief_warning(msg, stacklevel=3)
             return out_arr
         else:
-            raise Error('Have numpy >=1.10 but still called __array_prepare__')
+            raise Error('Have numpy >=1.11 but still called __array_prepare__')
 
     def __array_wrap__(self, out_arr, context=None):
         #print('In RemoteArray __array_wrap__')
@@ -580,13 +580,13 @@ class DistArray(object):
 
     def __array_prepare__(self, out_arr, context=None):
         """Fetch underlying data to user's computer and apply ufunc locally.
-        Only used as a fallback, for numpy versions < 1.10 which lack 
+        Only used as a fallback, for numpy versions < 1.11 which lack 
         support for the __numpy_ufunc__ mechanism. 
         """
         #print('In DistArray __array_prepare__. context=%s' % repr(context))
-        if list(map(int, np.version.short_version.split('.'))) < [1,10,0]:
+        if list(map(int, np.version.short_version.split('.'))) < [1,11,0]:
             msg = (u'\nNote: Distob distributed array arithmetic and ufunc ' +
-                    'support requires\nnumpy 1.10.0 or later (not yet ' +
+                    'support requires\nnumpy 1.11.0 or later (not yet ' +
                     'released!) Can get the latest numpy here: \n' +
                     'https://github.com/numpy/numpy/archive/master.zip\n' +
                     'Otherwise, will bring data back to the client to ' +
@@ -594,7 +594,7 @@ class DistArray(object):
             _brief_warning(msg, stacklevel=3)
             return out_arr
         else:
-            raise Error('Have numpy >=1.10 but still called __array_prepare__')
+            raise Error('Have numpy >=1.11 but still called __array_prepare__')
 
     def __array_wrap__(self, out_arr, context=None):
         #print('In DistArray __array_wrap__')
