@@ -49,7 +49,7 @@ class lrucache(object):
         # Initialize the doubly linked list with one empty node. This is an
         # invariant. The cache size must always be greater than zero. Each
         # node has a 'prev' and 'next' variable to hold the node that comes
-        # before it and after it respectivly. Initially the two variables
+        # before it and after it respectively. Initially the two variables
         # each point to the head node itself, creating a circular doubly
         # linked list of size one. Then the size() method is used to adjust
         # the list to the desired size.
@@ -501,7 +501,28 @@ class WriteBackCacheManager(object):
         return False
 
 
+class FunctionCacheManager(object):
+    def __init__(self, func, size):
+        self.func = func
+        self.cache = lrucache(size)
 
+    def size(self, size=None):
+        return self.cache.size(size)
+
+    def clear(self):
+        self.cache.clear()
+
+    def __call__(self, *args, **kwargs):
+        kwtuple = tuple((key, kwargs[key]) for key in sorted(kwargs.keys()))
+        key = (args, kwtuple)
+        try:
+            return self.cache[key]
+        except KeyError:
+            pass
+
+        value = self.func(*args, **kwargs)
+        self.cache[key] = value
+        return value
 
 
 def lruwrap(store, size, writeback=False):
@@ -510,15 +531,14 @@ def lruwrap(store, size, writeback=False):
     else:
         return WriteThroughCacheManager(store, size)
 
-
-
+import functools
 
 class lrudecorator(object):
     def __init__(self, size):
         self.cache = lrucache(size)
 
     def __call__(self, func):
-        def wrapped(*args, **kwargs):
+        def wrapper(*args, **kwargs):
             kwtuple = tuple((key, kwargs[key]) for key in sorted(kwargs.keys()))
             key = (args, kwtuple)
             try:
@@ -529,4 +549,8 @@ class lrudecorator(object):
             value = func(*args, **kwargs)
             self.cache[key] = value
             return value
-        return wrapped
+
+        wrapper.cache = self.cache
+        wrapper.size = self.cache.size
+        wrapper.clear = self.cache.clear
+        return functools.update_wrapper(wrapper, func)
