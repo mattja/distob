@@ -130,6 +130,7 @@ class ObjectEngine(dict):
     Attributes:
       eid (int): IPython engine id number of this engine. A negative number 
         means this is an IPython client, rather than an engine.
+      nengines (int): Total number of IPython engines (at startup time)
       refcounts (dict): Key is an object Id (for an object held on this engine)
         Value is the cluster-wide count of how many Ref instances exist 
         pointing to that object.
@@ -138,8 +139,9 @@ class ObjectEngine(dict):
         full object. This dict holds mappings {real_type: proxy_type} for 
         these types.
     """
-    def __init__(self, engine_id):
+    def __init__(self, engine_id, nengines):
         self.eid = engine_id 
+        self.nengines = nengines
         self.refcounts = dict()
         self.proxy_types = dict()
         super(ObjectEngine, self).__init__()
@@ -225,7 +227,8 @@ class ObjectHub(ObjectEngine):
         self._client = client
         self._dv = client.direct_view(targets='all')
         self._dv.use_dill()
-        super(ObjectHub, self).__init__(engine_id)
+        nengines = len(client)
+        super(ObjectHub, self).__init__(engine_id, nengines)
         # TODO: restore following two lines after issue #58 in dill is fixed.
         #for realtype, proxytype in self.__class__._initial_proxy_types.items():
         #    self._runtime_reg_proxy_type(realtype, proxytype)
@@ -309,10 +312,10 @@ class ObjectHub(ObjectEngine):
         return remote_keys + local_keys
 
 
-def _remote_setup_engine(engine_id):
+def _remote_setup_engine(engine_id, nengines):
     """(Executed on remote engine) creates an ObjectEngine instance """
     if distob.engine is None:
-        distob.engine = distob.ObjectEngine(engine_id)
+        distob.engine = distob.ObjectEngine(engine_id, nengines)
     # TODO these imports should be unnecessary with improved deserialization
     import numpy as np
     from scipy import stats
@@ -340,6 +343,7 @@ def _setup_engines(client=None):
     eids = client.ids
     if not eids:
         raise DistobClusterError(u'No IPython compute engines are available')
+    nengines = len(eids)
     dv = client[eids]
     dv.use_dill()
     with dv.sync_imports(quiet=True):
@@ -348,7 +352,7 @@ def _setup_engines(client=None):
     ars = []
     for i in eids:
         dv.targets = i
-        ars.append(dv.apply_async(_remote_setup_engine, i))
+        ars.append(dv.apply_async(_remote_setup_engine, i, nengines))
     dv.wait(ars)
     for ar in ars:
         if not ar.successful():
@@ -946,12 +950,6 @@ def _scatter_ndarray(ar, axis=-1, destination=None):
         return _directed_scatter([ar], destination=[destination])[0]
     if distob.engine is None:
         _setup_engines()
-    num_engines = len(distob.engine._client)
-    if n > num_engines * 100:
-        message = (u'Currently have only implemented splitting an axis into '
-                    'chunks of length 1. axis %d is long (%d), so may be slow '
-                    'distributing the array along this axis.' % (axis, n))
-        warnings.warn(message, RuntimeWarning)
     if isinstance(ar, DistArray):
         if axis == ar._distaxis:
             return ar
@@ -962,10 +960,22 @@ def _scatter_ndarray(ar, axis=-1, destination=None):
     if isinstance(ar, RemoteArray):
         ar = ar._ob
     s = slice(None)
+    ne = distob.engine.nengines
     subarrays = []
-    for i in range(n):
-        index = (s,)*axis + (slice(i,i+1),) + (s,)*(ndim - axis - 1)
+    r = n % ne
+    step1 = n // ne + 1
+    step2 = n // ne
+    low = 0
+    for i in range(0, r):
+        high = low + step1
+        index = (s,)*axis + (slice(low, high),) + (s,)*(ndim - axis - 1)
         subarrays.append(ar[index])
+        low += step1
+    for i in range(0, ne - r):
+        high = low + step2
+        index = (s,)*axis + (slice(low, high),) + (s,)*(ndim - axis - 1)
+        subarrays.append(ar[index])
+        low += step2
     subarrays = _directed_scatter(subarrays, destination=destination)
     return DistArray(subarrays, axis)
 

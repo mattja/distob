@@ -406,48 +406,61 @@ class DistArray(object):
         Args:
           subarrays (list of RemoteArrays, ndarrays or Refs to ndarrays):
             the subarrays (possibly remote) which form the whole array when
-            concatenated. The subarrays must all have the same shape and dtype.
-            Currently must have `a.shape[axis] == 1` for each subarray `a`
+            concatenated. The subarrays must have the same dtype, and must
+            have the same shape excepting the distributed axis.
           axis (int, optional): Position of the distributed axis, which is the 
             axis along which the subarrays will be concatenated. Default is 
             the last axis.  
         """
-        self._n = len(subarrays)  # Length of the distributed axis.
+        from distob import engine
+        self._n = len(subarrays)  # number of subarrays along distributed axis.
         if self._n < 2:
             raise ValueError('must provide more than one subarray')
         self._pref_local = True
         self._obcache = None
         self._obcache_current = False
+        if axis is None:
+            self._distaxis = subarrays[0].ndim - 1
+        else:
+            self._distaxis = axis
         # In the subarrays list, accept RemoteArray, ndarray or Ref to ndarray:
         for i, ra in enumerate(subarrays):
             if not isinstance(ra, RemoteArray):
                 if not isinstance(ra, Ref):
                     ra = Ref(ra)
-                from distob import engine
                 RemoteClass = engine.proxy_types[ra.type]
                 subarrays[i] = RemoteClass(ra)
-        first_ra_metadata = subarrays[0]._ref.metadata
-        if not all(ra._ref.metadata == first_ra_metadata for ra in subarrays):
-            raise ValueError('subarrays must have same shape, strides & dtype')
-        descr, subshape, substrides, typestr = first_ra_metadata
-        itemsize = int(typestr[2:])
-        if axis is None:
-            self._distaxis = len(subshape) - 1
-        else:
-            self._distaxis = axis
-        # For numpy strides, `None` means assume C-style ordering:
-        if substrides is None:
-            substrides = tuple(int(np.product(
-                    subshape[i:])*itemsize) for i in range(1, len(subshape)+1))
-        shape = list(subshape)
-        shape[self._distaxis] = self._n
+        # Require all subarrays to resemble the first, excepting distaxis:
+        descr0, subshape0, substrides0, typestr0 = subarrays[0]._ref.metadata
+        shape0 = list(subshape0)
+        shape0[self._distaxis] = None  # ignore this axis for shape comparison
+        sublengths = [] # length of each subarray
+        # si[i] is the starting index of the ith subarray for i=0..(self._n-1)
+        # si[self._n] == self.shape[self._distaxis], i.e. one past the end.
+        si = [0] 
+        for i, ra in enumerate(subarrays):
+            descr, subshape, substrides, typestr = ra._ref.metadata
+            if descr != descr0 or typestr != typestr0:
+                raise ValueError('subarrays must have same dtype')
+            sublengths.append(subshape[self._distaxis])
+            si.append(si[-1] + sublengths[-1])
+            shapei = list(subshape)
+            shapei[self._distaxis] = None
+            if shapei != shape0:
+                raise ValueError('subarrays must have the same shape except ' +
+                                 'on the axis being distributed')
+        self._sublengths = tuple(sublengths)
+        self._si = tuple(si)
+        itemsize = int(typestr0[2:])
+        shape = list(subshape0)
+        shape[self._distaxis] = sum(sublengths)
         shape = tuple(shape)
         # For now, report the same strides as used by the subarrays
         strides = substrides
         self.dtype = np.dtype(typestr)
         self._subarrays = subarrays
         # a surrogate ndarray to help with slicing of the distributed axis:
-        self._placeholders = np.array(range(len(subarrays)), dtype=int)
+        self._placeholders = np.array(range(shape[self._distaxis]), dtype=int)
         # implement the python array interface
         self._array_intf = {'descr': descr, 'shape': shape, 'strides': strides,
                             'typestr': typestr, 'version': 3}
@@ -479,7 +492,7 @@ class DistArray(object):
             # let subarray obcaches and main obcache be views on same memory:
             for i in range(self._n):
                 ix = [slice(None)] * self.ndim
-                ix[ax] = slice(i, i+1)
+                ix[ax] = slice(self._si[i], self._si[i+1])
                 self._subarrays[i]._obcache = self._obcache[tuple(ix)]
             self._obcache_current = True
             # now prefer local processing:
@@ -600,6 +613,119 @@ class DistArray(object):
         #print('In DistArray __array_wrap__')
         return out_arr
 
+    def _tosub(self, ix):
+        """Given an integer index ix on the distributed axis, returns the pair
+        (s, m) where s is the relevant subarray and m is the subindex into s.
+        For example if the last axis is distributed,
+          self[...,ix] == self._subarrays[s][...,m]
+        """
+        N = self.shape[self._distaxis]
+        if ix >= N or ix < -N:
+            raise IndexError(
+                    'index %d out of bounds for axis %d of size %d',
+                    ix, self._distaxis, N)
+        if ix < 0:
+            ix += N
+        for s in range(0, self._n):
+            if self._si[s + 1] - 1 >= ix:
+                break
+        m = ix - self._si[s]
+        return s, m
+
+    def _tosubs(self, ixlist):
+        """Maps a list of integer indices of the DistArray to subarray indices.
+        ixlist can contain repeated indices and does not need to be sorted.
+        Returns pair (ss, ms) where ss is a list of subarrays and ms is a
+        list of lists of subindices m (one list for each subarray s in ss).
+        """
+        n = len(ixlist)
+        N = self.shape[self._distaxis]
+        ss = []
+        ms = []
+        j = 0 # the position in ixlist currently being processed
+        ix = ixlist[j]
+        if ix >= N or ix < -N:
+            raise IndexError(
+                    'index %d out of bounds for axis %d of size %d',
+                    ix, self._distaxis, N)
+        if ix < 0:
+            ix += N
+        while j < n:
+            for s in range(0, self._n):
+                low = self._si[s]
+                high = self._si[s + 1]
+                if ix >= low and ix < high:
+                    ss.append(s)
+                    msj = [ix - low]
+                    j += 1
+                    while j < n:
+                        ix = ixlist[j]
+                        if ix >= N or ix < -N:
+                            raise IndexError(
+                              'index %d out of bounds for axis %d of size %d',
+                              ix, self._distaxis, N)
+                        if ix < 0:
+                            ix += N
+                        if ix < low or ix >= high:
+                            break
+                        msj.append(ix - low)
+                        j += 1
+                    ms.append(msj)
+                if ix < low:
+                    break
+        return ss, ms
+
+    def _tosubsj(self, ixlist):
+        """Like _tosubs(), maps a list of integer indices of the DistArray to
+        subarray indices, but also returns the positions processed in the
+        original index list.
+        ixlist can contain repeated indices and does not need to be sorted.
+        Returns tuple (ss, ms, js) where ss is a list of subarrays, ms is a
+        list of lists of subindices m (one list for each subarray s in ss), and
+        js is a list of lists of positions in ixlist that were processed (one
+        list for each subarray s in ss).
+        """
+        n = len(ixlist)
+        N = self.shape[self._distaxis]
+        ss = []
+        ms = []
+        js = []
+        j = 0 # the position in ixlist currently being processed
+        ix = ixlist[j]
+        if ix >= N or ix < -N:
+            raise IndexError(
+                    'index %d out of bounds for axis %d of size %d',
+                    ix, self._distaxis, N)
+        if ix < 0:
+            ix += N
+        while j < n:
+            for s in range(0, self._n):
+                low = self._si[s]
+                high = self._si[s + 1]
+                if ix >= low and ix < high:
+                    ss.append(s)
+                    msj = [ix - low]
+                    jsj = [j]
+                    j += 1
+                    while j < n:
+                        ix = ixlist[j]
+                        if ix >= N or ix < -N:
+                            raise IndexError(
+                              'index %d out of bounds for axis %d of size %d',
+                              ix, self._distaxis, N)
+                        if ix < 0:
+                            ix += N
+                        if ix < low or ix >= high:
+                            break
+                        msj.append(ix - low)
+                        jsj.append(j)
+                        j += 1
+                    ms.append(msj)
+                    js.append(jsj)
+                if ix < low:
+                    break
+        return ss, ms, js
+
     def __getitem__(self, index):
         """Slice the distributed array"""
         # To be a DistArray, must have an axis across >=2 engines. If the slice
@@ -649,11 +775,15 @@ class DistArray(object):
             ixlist = self._placeholders[distix]
             if isinstance(ixlist, numbers.Number):
                 # distributed axis has been sliced away: return a RemoteArray
-                subix = index[0:distaxis] + (0,) + index[(distaxis+1):]
-                return self._subarrays[ixlist][subix]
-            some_subarrays = [self._subarrays[i] for i in ixlist]
-            subix = index[0:distaxis] + (slice(None),) + index[(distaxis+1):]
-            result_ras = [ra[subix] for ra in some_subarrays]
+                s, i = self._tosub(ixlist)
+                subix = index[0:distaxis] + (i,) + index[(distaxis+1):]
+                return self._subarrays[s][subix]
+            result_ras = []
+            ss, ms = self._tosubs(ixlist)
+            for s, m in zip(ss, ms):
+                m = slice(m[0], m[-1] + 1)
+                subix = index[0:distaxis] + (m,) + index[(distaxis+1):]
+                result_ras.append(self._subarrays[s][subix])
             if len(result_ras) is 1:
                 # no longer distributed: return a RemoteArray
                 return result_ras[0]
@@ -682,10 +812,14 @@ class DistArray(object):
                 # fancy indexing is only being applied to non-distributed axes
                 ixlist = self._placeholders[distix]
                 if isinstance(ixlist, numbers.Number):
+                    s, m = self._tosub(ixlist)
                     # distributed axis was sliced away: return a RemoteArray
-                    subix = index[0:distaxis] + (0,) + index[(distaxis+1):]
-                    return self._subarrays[ixlist][subix]
-                some_subarrays = [self._subarrays[i] for i in ixlist]
+                    subix = index[0:distaxis] + (m,) + index[(distaxis+1):]
+                    return self._subarrays[s][subix]
+                result_ras = []
+                ss, ms = self._tosubs(ixlist)
+                for s, m in zip(ss, ms):
+                    result_ras.append(self._subarrays[s][m])
                 # predict where that new axis will be in subarrays post-slicing
                 if contiguous:
                     if fancy_pos[0] > distaxis:
@@ -695,7 +829,6 @@ class DistArray(object):
                 else:
                     earlier_fancy = len([i for i in fancy_pos if i < distaxis])
                     new_distaxis = distaxis - earlier_fancy + idim
-                result_ras = [ra[otherix] for ra in some_subarrays]
             else:
                 # fancy indexing is being applied to the distributed axis
                 nonconstant_ix_axes = []
@@ -722,26 +855,30 @@ class DistArray(object):
                     iix[iax] = slice(None)
                     iix = tuple(iix)
                     ixlist = self._placeholders[distix[iix]]
-                    some_subarrays = [self._subarrays[i] for i in ixlist]
                     if contiguous:
                         new_distaxis = fancy_pos[0] + iax
                     else:
                         new_distaxis = 0 + iax
                     result_ras = []
-                    for i in range(distix.shape[iax]):
+                    ss, ms, js = self._tosubsj(ixlist)
+                    shp = [1] * idim
+                    for s, m, jlist in zip(ss, ms, js):
                         # Slice the original indexing arrays into smaller
                         # arrays, suitable for indexing our subarrays.
+                        shp[iax] = len(m)
+                        m = np.array(m).reshape(shp) # make shape broadcastable
                         sl = [slice(None)] * idim
-                        sl[iax] = slice(i, i+1)
+                        sl[iax] = jlist
                         sl = tuple(sl)
                         subix = list(index)
-                        for j in range(len(subix)):
-                            if isinstance(subix[j], np.ndarray):
-                                subix[j] = subix[j][sl]
-                                if j == distaxis:
-                                    subix[j] = np.zeros_like(subix[j])
+                        for i in range(len(subix)):
+                            if isinstance(subix[i], np.ndarray):
+                                if i == distaxis:
+                                    subix[i] = m
+                                else:
+                                    subix[i] = subix[i][sl]
                         subix = tuple(subix)
-                        result_ras.append(some_subarrays[i][subix])
+                        result_ras.append(self._subarrays[s][subix])
                     if all_same_engine and len(result_ras) > 1:
                         rs = [expand_dims(r, new_distaxis) for r in result_ras]
                         return concatenate(rs, new_distaxis) # one RemoteArray
