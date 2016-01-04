@@ -934,27 +934,19 @@ class DistArray(object):
             DistArray. (otherwise will return a list with the result for each 
             subarray).
         """
-        def _reduced_f(a, distaxis, *args, **kwargs):
-            """(Executed on a remote or local engine) Remove specified axis
-            from array `a` and then apply f to it"""
-            remove_axis = ((slice(None),)*(distaxis) + (0,) +
-                           (slice(None),)*(a.ndim - distaxis - 1))
-            return f(a[remove_axis], *args, **kwargs)
         def vf(self, *args, **kwargs):
             kwargs = kwargs.copy()
             kwargs['block'] = False
             kwargs['prefer_local'] = False
-            ars = [call(_reduced_f, ra, self._distaxis,
-                        *args, **kwargs) for ra in self._subarrays]
+            ars = [call(f, ra, *args, **kwargs) for ra in self._subarrays]
             results = [convert_result(ar) for ar in ars]
-            if (all(isinstance(r, RemoteArray) for r in results) and
-                    all(r.shape == results[0].shape for r in results)):
-                # Then we can join the results and return a DistArray.
+            if all(isinstance(r, RemoteArray) for r in results):
+                # Then we will join the results and return a DistArray.
                 # To position result distaxis, match input shape where possible
                 old_subshape = (self.shape[0:self._distaxis] +
                                 self.shape[(self._distaxis+1):])
                 res_subshape = list(results[0].shape)
-                pos = len(res_subshape)
+                pos = len(res_subshape) - 1
                 for i in range(len(old_subshape)):
                     n = old_subshape[i]
                     if n not in res_subshape:
@@ -965,7 +957,6 @@ class DistArray(object):
                         break
                     pos += 1
                 new_distaxis = pos
-                results = [r.expand_dims(new_distaxis) for r in results]
                 return DistArray(results, new_distaxis)
             elif all(isinstance(r, numbers.Number) for r in results):
                 return np.array(results)
@@ -1329,7 +1320,6 @@ def _ufunc_move_input(obj, location, bshape):
         # location is a tuple (list of engine ids, distaxis) indicating that
         # obj should be distributed.
         engine_ids, distaxis = location
-        assert(len(engine_ids) == bshape[distaxis])
         if not isinstance(obj, DistArray):
             gather(obj)
             if isinstance(obj, Sequence):
@@ -1346,11 +1336,8 @@ def _ufunc_move_input(obj, location, bshape):
             # broadcast this axis across engines
             subarrays = [_directed_scatter(obj, None, m) for m in engine_ids]
             return DistArray(subarrays, distaxis)
-        elif obj.shape[distaxis] == len(engine_ids):
-            return _directed_scatter(obj, distaxis, destination=engine_ids)
         else:
-            raise ValueError(u'shape mismatch: two or more arrays have '
-                              'incompatible dimensions on axis %d' % distaxis)
+            return _directed_scatter(obj, distaxis, destination=engine_ids)
 
 
 def _ufunc_dispatch(ufunc, method, i, inputs, **kwargs):
@@ -1418,14 +1405,9 @@ def _ufunc_dispatch(ufunc, method, i, inputs, **kwargs):
                         ndim = inputs[i].ndim
                         assert(inputs[i]._distaxis == distaxis)
                         assert(inputs[i]._n == n)
-                def _reduced_call(inputs, is_dist, ndim, distaxis, **kwargs):
-                    """(Executed on a remote or local engine) Remove specified
-                    axis from subarray inputs then apply the ufunc call """
-                    remove_ax = ((slice(None),)*(distaxis) + (0,) +
-                                 (slice(None),)*(ndim - distaxis - 1))
-                    input0 = inputs[0][remove_ax] if is_dist[0] else inputs[0]
-                    input1 = inputs[1][remove_ax] if is_dist[1] else inputs[1]
-                    return ufunc.__call__(input0, input1, **kwargs)
+                def _remote_ucall(inputs, **kwargs):
+                    """(Executed on a remote or local engine) call the ufunc"""
+                    return ufunc.__call__(inputs[0], inputs[1], **kwargs)
                 results = []
                 kwargs = kwargs.copy()
                 kwargs['block'] = False
@@ -1433,10 +1415,8 @@ def _ufunc_dispatch(ufunc, method, i, inputs, **kwargs):
                 for j in range(n):
                     subinputs = tuple(inputs[i]._subarrays[j] if 
                             is_dist[i] else inputs[i] for i in (0, 1))
-                    results.append(call(_reduced_call, subinputs, is_dist,
-                                        ndim, distaxis, **kwargs))
+                    results.append(call(_remote_ucall, subinputs, **kwargs))
                 results = [convert_result(ar) for ar in results]
-                results = [ra.expand_dims(distaxis) for ra in results]
                 return DistArray(results, distaxis)
     elif ufunc.nin > 2:
         raise Error(u'Distributing ufuncs with >2 inputs is not yet supported')
