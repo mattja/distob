@@ -1024,24 +1024,39 @@ class DistArray(object):
         new_subarrays = [expand_dims(ra, subaxis) for ra in self._subarrays]
         return DistArray(new_subarrays, new_distaxis)
 
-    def mean(self, axis=None, dtype=None, out=None):
-        """Compute the arithmetic mean along the specified axis."""
+    def mean(self, axis=None, dtype=None, out=None, keepdims=False):
+        """Compute the arithmetic mean along the specified axis.
+        See np.mean() for details."""
+        if axis == -1:
+            axis = self.ndim
         if axis is None:
-            if out is not None:
-                out[:] = vectorize(np.mean)(self, None, dtype).mean()
-                return out
-            else:
-                return vectorize(np.mean)(self, None, dtype).mean()
+            results = vectorize(mean)(self, axis, dtype, keepdims=False)
+            weights = self._sublengths
+            res = np.average(results, axis=None, weights=weights)
+            if keepdims:
+                for i in range(self.ndim):
+                    res = expand_dims(res, res.ndim)
         elif axis == self._distaxis:
-            return np.mean(self._ob, axis, dtype, out)
+            results = vectorize(mean)(self, axis, dtype, keepdims=True)
+            results = gather(results)
+            # Average manually (np.average doesn't preserve ndarray subclasses)
+            weights = (np.array(self._sublengths, dtype=np.float64) /
+                       sum(self._sublengths))
+            ix = [slice(None)] * self.ndim
+            ix[axis] = 0
+            res = results[ix] * weights[0]
+            for i in range(1, self._n):
+                ix[axis] = i
+                res = res + results[ix] * weights[i]
+            if keepdims:
+                res = expand_dims(res, axis)
         else:
-            if axis > self._distaxis:
-                axis -= 1
-            if out is not None:
-                out[:] = vectorize(np.mean)(self, axis, dtype)
-                return out
-            else:
-                return vectorize(np.mean)(self, axis, dtype)
+            res = vectorize(mean)(self, axis, dtype, keepdims=False)
+            if keepdims:
+                res = expand_dims(res, axis)
+        if out is not None:
+            out[:] = res
+        return res
 
     # The following operations will be intercepted by __numpy_ufunc__()
 
@@ -1727,3 +1742,52 @@ def broadcast_arrays(*args):
                 raise ValueError(u'shape mismatch: two or more arrays have '
                                   'incompatible dimensions on axis %d' % ax)
     return arrays
+
+
+def mean(a, axis=None, dtype=None, out=None, keepdims=False):
+    """
+    Compute the arithmetic mean along the specified axis.
+
+    Returns the average of the array elements.  The average is taken over
+    the flattened array by default, otherwise over the specified axis.
+    `float64` intermediate and return values are used for integer inputs.
+
+    Parameters
+    ----------
+    a : array_like
+        Array containing numbers whose mean is desired. If `a` is not an
+        array, a conversion is attempted.
+    axis : None or int or tuple of ints, optional
+        Axis or axes along which the means are computed. The default is to
+        compute the mean of the flattened array.
+        If this is a tuple of ints, a mean is performed over multiple axes,
+        instead of a single axis or all the axes as before.
+    dtype : data-type, optional
+        Type to use in computing the mean.  For integer inputs, the default
+        is `float64`; for floating point inputs, it is the same as the
+        input dtype.
+    out : ndarray, optional
+        Alternate output array in which to place the result.  The default
+        is ``None``; if provided, it must have the same shape as the
+        expected output, but the type will be cast if necessary.
+        See `doc.ufuncs` for details.
+    keepdims : bool, optional
+        If this is set to True, the axes which are reduced are left
+        in the result as dimensions with size one. With this option,
+        the result will broadcast correctly against the original `arr`.
+
+    Returns
+    -------
+    m : ndarray, see dtype parameter above
+
+    Notes
+    -----
+    np.mean fails to pass the keepdims parameter to ndarray subclasses.
+    That is the main reason we implement this function.
+    """
+    if (isinstance(a, np.ndarray) or
+            isinstance(a, RemoteArray) or
+            isinstance(a, DistArray)):
+        return a.mean(axis=axis, dtype=dtype, out=out, keepdims=keepdims)
+    else:
+        return np.mean(a, axis=axis, dtype=dtype, out=out, keepdims=keepdims)

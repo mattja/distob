@@ -17,4 +17,4 @@ __version__ = '0.2.1-dev'
 if _have_numpy:
     from .arrays import (RemoteArray, DistArray, transpose, rollaxis,
                          expand_dims, concatenate, vstack, hstack, dstack, 
-                         split, vsplit, hsplit, dsplit, broadcast_arrays)
+                         split, vsplit, hsplit, dsplit, broadcast_arrays, mean)
