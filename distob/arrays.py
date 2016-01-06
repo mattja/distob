@@ -189,16 +189,8 @@ class RemoteArray(Remote, object):
             return call(concatenate, rarrays, axis)
         else:
             # Arrays to be joined are on different engines.
-            concatenation_axis_lengths = [ra.shape[axis] for ra in rarrays]
-            if not all(n == 1 for n in concatenation_axis_lengths):
-                #TODO: should do it remotely, using distob.split()
-                msg = (u'Concatenating remote axes with lengths other than 1.'
-                        'current implementation will fetch all data locally!')
-                warnings.warn(msg, RuntimeWarning)
-                array = concatenate(gather(rarrays), axis)
-                return scatter(array, axis)
-            else:
-                return DistArray(rarrays, axis)
+            # TODO: consolidate any consecutive arrays already on same engine
+            return DistArray(rarrays, axis)
 
     # The following operations will be intercepted by __numpy_ufunc__()
 
