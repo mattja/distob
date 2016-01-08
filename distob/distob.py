@@ -326,7 +326,7 @@ def _remote_setup_engine(engine_id, nengines):
     __main__.__dict__['stats'] = stats
 
 
-def _setup_engines(client=None):
+def setup_engines(client=None):
     """Prepare all iPython engines for distributed object processing.
 
     Args:
@@ -686,7 +686,7 @@ class Remote(object):
             controlled.
         """
         if distob.engine is None:
-            _setup_engines()
+            setup_engines()
         if isinstance(obj, Ref):
             self._ref = obj
             self.is_local = (self._ref.id.engine is distob.engine.eid)
@@ -875,7 +875,7 @@ def _async_scatter(obj, destination=None):
         return ars
     else:
         if distob.engine is None:
-            _setup_engines()
+            setup_engines()
         client = distob.engine._client
         dv = distob.engine._dv
         def remote_put(obj):
