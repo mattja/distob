@@ -71,9 +71,6 @@ the client)
 
 TODO
 ----
-
--  Make distributed arrays scale: The current version splits the distributed axis finely into pieces of length 1. This scales badly if the length of that axis is much greater than the number of CPUs n. Instead split into n larger chunks.
-
 -  Allow assignment to slices of remote arrays
 
 -  Implement caching of remote array slice operations
