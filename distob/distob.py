@@ -518,11 +518,18 @@ def call(f, *args, **kwargs):
 
 
 def convert_result(r):
-    """Waits for and converts any AsyncResult. Converts any Ref into a Remote.
+    """Waits for and converts any AsyncResults. Converts any Ref into a Remote.
     Args:
-      r: can be either an ordinary object, parallel.AsyncResult, or a Ref
+      r: can be an ordinary object, parallel.AsyncResult, a Ref, or a Sequence
+         of objects, AsyncResults and Refs.
     Returns: 
       either an ordinary object or a Remote instance"""
+    if (isinstance(r, collections.Sequence) and
+            not isinstance(r, string_types)):
+        rs = []
+        for subresult in r:
+            rs.append(convert_result(subresult))
+        return rs
     if isinstance(r, parallel.AsyncResult):
         r = r.r
     if isinstance(r, Ref):
@@ -539,7 +546,17 @@ def _remote_methodcall(id, method_name, *args, **kwargs):
         if isinstance(v, Id):
             kwargs[k] = distob.engine[v]
     result = getattr(obj, method_name)(*args, **kwargs)
-    if type(result) in distob.engine.proxy_types:
+    if (isinstance(result, collections.Sequence) and
+            not isinstance(result, string_types)):
+        # We will return any sub-sequences by value, not recurse deeper
+        results = []
+        for subresult in result:
+            if type(subresult) in distob.engine.proxy_types: 
+                results.append(Ref(subresult))
+            else:
+                results.append(subresult)
+        return results
+    elif type(result) in distob.engine.proxy_types:
         return Ref(result)
     else:
         return result
@@ -624,17 +641,22 @@ def _scan_instance(obj, include_underscore, exclude):
 
     Args:
       obj (object): the object to scan. must be on this local engine.
-      include_underscore (sequence of str): names of any methods or attributes
-        that should be included even though they start with an underscore.
+      include_underscore (bool or sequence of str): Should methods or
+        attributes that start with an underscore be proxied anyway? If a
+        sequence of names is provided then methods or attributes starting with
+        an underscore will only be proxied if their names are in the sequence.
       exclude (sequence of str): names of any methods or attributes that should
         not be reported.
     """
     from sys import getsizeof
+    always_exclude = ('__new__', '__init__', '__getattribute__', '__class__',
+                      '__reduce__', '__reduce_ex__')
     method_info = []
     attributes_info = []
     if hasattr(obj, '__dict__'):
         for name in obj.__dict__:
             if (name not in exclude and 
+                name not in always_exclude and
                 (name[0] != '_' or 
                  include_underscore is True or
                  name in include_underscore)):
@@ -781,13 +803,17 @@ def proxy_methods(base, include_underscore=None, exclude=None, supers=True):
 
     Args:
       base (type): The class whose instances should be remotely controlled.
-      include_underscore (sequence of str): Names of any methods or attributes 
-        that start with an underscore but should be proxied anyway.
+      include_underscore (bool or sequence of str): Should methods or
+        attributes that start with an underscore be proxied anyway? If a
+        sequence of names is provided then methods or attributes starting with
+        an underscore will only be proxied if their names are in the sequence.
       exclude (sequence of str): Names of any methods or attributes that 
         should not be proxied.
       supers (bool): Proxy methods and attributes defined in superclasses 
         of ``base``, in addition to those defined directly in class ``base``
     """
+    always_exclude = ('__new__', '__init__', '__getattribute__', '__class__',
+                      '__reduce__', '__reduce_ex__')
     if isinstance(include_underscore, str):
         include_underscore = (include_underscore,)
     if isinstance(exclude, str):
@@ -831,6 +857,7 @@ def proxy_methods(base, include_underscore=None, exclude=None, supers=True):
                         all(name not in b.__dict__ 
                             for c in bases_other for b in c.mro()[:-1]) and
                         name not in newcls._exclude and
+                        name not in always_exclude and
                         (name[0] != '_' or 
                          newcls._include_underscore is True or
                          name in newcls._include_underscore)):
