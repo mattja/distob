@@ -667,6 +667,55 @@ class DistArray(object):
                     break
         return ss, ms, js
 
+    def _tosubslices(self, sl):
+        """Maps a slice object for whole array to slice objects for subarrays.
+        Returns pair (ss, ms) where ss is a list of subarrays and ms is a list
+        giving the slice object that should be applied to each subarray.
+        """
+        N = self.shape[self._distaxis]
+        start, stop, step = sl.start, sl.stop, sl.step
+        if step is None:
+            step = 1
+        ss = []
+        ms = []
+        if step > 0:
+            if start is None:
+                start = 0
+            if stop is None:
+                stop = N
+            subs = range(0, self._n)
+            for s in subs:
+                low = self._si[s]
+                high = self._si[s + 1]
+                first = low + ((low - start) % step)
+                last = high + ((high - start) % step)
+                if start < high and stop > low and first < high:
+                    ss.append(s)
+                    substart = max(first, start) - low
+                    substop = min(last, stop) - low
+                    ms.append(slice(substart, substop, step))
+        elif step < 0:
+            if start is None:
+                start = N - 1
+            if stop is None:
+                stop = -1
+            subs = range(self._n - 1, -1, -1)
+            for s in subs:
+                low = self._si[s]
+                high = self._si[s + 1]
+                first = high + step + ((high - start) % step)
+                last = low + step + ((low - start) % step)
+                if start >= low and stop < high and first >= low:
+                    ss.append(s)
+                    substart = min(first, start) - low
+                    substop = max(last + step, stop) - low
+                    if substop < 0:
+                        substop = None
+                    ms.append(slice(substart, substop, step))
+        else:
+            raise ValueError('slice step cannot be zero')
+        return ss, ms
+
     def __getitem__(self, index):
         """Slice the distributed array"""
         # To be a DistArray, must have an axis across >=2 engines. If the slice
@@ -743,6 +792,8 @@ class DistArray(object):
             ix_arrays = [index[j] for j in fancy_pos]
             ix_arrays = np.broadcast_arrays(*ix_arrays)
             for j in range(len(fancy_pos)):
+                if ix_arrays[j].shape is ():
+                    ix_arrays[j] = np.expand_dims(ix_arrays[j], 0)
                 index[fancy_pos[j]] = ix_arrays[j]
             index = tuple(index)
             idim = index[fancy_pos[0]].ndim # common ndim of all index arrays
@@ -751,16 +802,11 @@ class DistArray(object):
             otherix = index[0:distaxis] + (slice(None),) + index[(distaxis+1):]
             if not is_fancy[distaxis]:
                 # fancy indexing is only being applied to non-distributed axes
-                ixlist = self._placeholders[distix]
-                if isinstance(ixlist, numbers.Number):
-                    s, m = self._tosub(ixlist)
-                    # distributed axis was sliced away: return a RemoteArray
-                    subix = index[0:distaxis] + (m,) + index[(distaxis+1):]
-                    return self._subarrays[s][subix]
                 result_ras = []
-                ss, ms = self._tosubs(ixlist)
+                ss, ms = self._tosubslices(distix)
                 for s, m in zip(ss, ms):
-                    result_ras.append(self._subarrays[s][m])
+                    subix = index[0:distaxis] + (m,) + index[(distaxis+1):]
+                    result_ras.append(self._subarrays[s][subix])
                 # predict where that new axis will be in subarrays post-slicing
                 if contiguous:
                     if fancy_pos[0] > distaxis:
@@ -833,6 +879,10 @@ class DistArray(object):
             if len(result_ras) is 1:
                 # no longer distributed: return a RemoteArray
                 return result_ras[0]
+            engine0 = result_ras[0]._id.engine
+            if all(ra._id.engine == engine0 for ra in result_ras):
+                # no longer distributed: return a RemoteArray
+                return concatenate(result_ras, axis=new_distaxis)
             else:
                 return DistArray(result_ras, new_distaxis)
 
