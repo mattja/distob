@@ -910,6 +910,51 @@ class DistArray(object):
 
     T = property(fget=transpose)
 
+    @staticmethod
+    def _valid_distaxis(shapes, ax):
+        """`ax` is a valid candidate for a distributed axis if the given
+        subarray shapes are all the same when ignoring axis `ax`"""
+        compare_shapes = np.vstack(shapes)
+        if ax < compare_shapes.shape[1]:
+            compare_shapes[:, ax] = -1
+        return np.count_nonzero(compare_shapes - compare_shapes[0]) == 0
+
+    def _new_distaxis(self, out_shapes):
+        out_ndim = len(out_shapes[0])
+        in_shapes = [ra.shape for ra in self._subarrays]
+#         # To choose distaxis of result array, match input shape if possible:
+#         old_subshape = (in_shapes[0][0:self._distaxis] +
+#                         in_shapes[0][(self._distaxis+1):])
+#         res_subshape = list(out_shapes[0])
+#         i = out_ndim
+#         for i in range(len(old_subshape)):
+#             n = old_subshape[i]
+#             if n not in res_subshape:
+#                 continue
+#             i = res_subshape.index(n)
+#             res_subshape[i] = None
+#             if i >= self._distaxis:
+#                 break
+#             i += 1
+#         if self._valid_distaxis(out_shapes, i):
+#             return i
+        # Find last axis with shape of the original distaxis:
+        for i in range(out_ndim - 1, -1, -1):
+            if (all(out_shapes[j][i] == in_shapes[j][self._distaxis] for
+                    j in range(self._n)) and
+                    self._valid_distaxis(out_shapes, i)):
+                return i
+        # Else find last axis that is length 1 on all subarrays:
+        for i in range(out_ndim - 1, -1, -1):
+            if (all(s[i] == 1 for s in out_shapes) and
+                    self._valid_distaxis(out_shapes, i)):
+                return i
+        # Finally try appending a new axis at the end:
+        if self._valid_distaxis(out_shapes, out_ndim):
+            return out_ndim
+        else:
+            return None
+
     @classmethod
     def __distob_vectorize__(cls, f):
         """Upgrades a normal function f to act on a DistArray in parallel
@@ -931,28 +976,20 @@ class DistArray(object):
             kwargs['prefer_local'] = False
             ars = [call(f, ra, *args, **kwargs) for ra in self._subarrays]
             results = [convert_result(ar) for ar in ars]
-            if all(isinstance(r, RemoteArray) for r in results):
+            if all(isinstance(r, RemoteArray) and
+                   r.ndim == results[0].ndim for r in results):
                 # Then we will join the results and return a DistArray.
-                # To position result distaxis, match input shape where possible
-                old_subshape = (self.shape[0:self._distaxis] +
-                                self.shape[(self._distaxis+1):])
-                res_subshape = list(results[0].shape)
-                pos = len(res_subshape) - 1
-                for i in range(len(old_subshape)):
-                    n = old_subshape[i]
-                    if n not in res_subshape:
-                        continue
-                    pos = res_subshape.index(n)
-                    res_subshape[pos] = None
-                    if i >= self._distaxis:
-                        break
-                    pos += 1
-                new_distaxis = pos
+                out_shapes = [ra.shape for ra in results]
+                new_distaxis = self._new_distaxis(out_shapes)
+                if new_distaxis is None:
+                    return results # incompatible array shapes. return a list.
+                if new_distaxis == results[0].ndim:
+                    results = [r.expand_dims(new_distaxis) for r in results]
                 return DistArray(results, new_distaxis)
             elif all(isinstance(r, numbers.Number) for r in results):
                 return np.array(results)
             else:
-                return results  # list
+                return results  # not arrays or numbers. return a list.
         if hasattr(f, '__name__'):
             vf.__name__ = 'v' + f.__name__
             f_str = f.__name__ + '()'
