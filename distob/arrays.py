@@ -1013,6 +1013,8 @@ class DistArray(object):
         Args:
           axis (int): Position (amongst axes) where new axis is to be inserted.
         """
+        if axis == -1:
+            axis = self.ndim
         if axis <= self._distaxis:
             subaxis = axis
             new_distaxis = self._distaxis + 1
@@ -1492,7 +1494,7 @@ def expand_dims(a, axis):
     """
     if hasattr(a, 'expand_dims') and hasattr(type(a), '__array_interface__'):
         return a.expand_dims(axis)
-    if isinstance(a, np.ndarray):
+    else:
         return np.expand_dims(a, axis)
 
 
