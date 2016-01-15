@@ -1,12 +1,10 @@
 distob
 ======
-
 | Distributed computing made easier, using remote objects
-|  N.B. this is a development pre-release: lots not yet working!
+|  N.B. this is a development pre-release: still a lot left to be done
 
 Overview
 --------
-
 Distob will take your existing python objects, or a sequence of objects,
 and scatter them onto many IPython parallel engines, which may be
 running on a single computer or on a cluster.
@@ -18,9 +16,7 @@ methods are passed through to the remote objects, where computation is done.
 
 In particular, sending numpy arrays to the cluster is supported. 
 
-A numpy array can also be scattered across the cluster, along a particular
-axis. Operations on the array can then be automatically done in parallel 
-(either using ufuncs, or by using ``vectorize()`` below)
+A numpy array can also be scattered across the cluster, along a particular axis. Operations on the array can then be automatically done in parallel (either using ufuncs, or by using ``vectorize()`` below)
 
 Note: numpy 1.11.0 or later (not yet released!) is required for full functionality with distributed array arithmetic and ufuncs. You can get a development snapshot of numpy here: https://github.com/numpy/numpy/archive/master.zip
 
@@ -30,7 +26,6 @@ cluster architectures, local CPUs, SSH nodes, PBS, Amazon EC2, etc.
 
 functions
 ---------
-
 | ``scatter(obj)`` Distribute any object (or list of objects) to remote iPython engines, return a proxy.
 | ``gather(obj)`` Fetch back a distributed object (or list), making it local again.
 |
@@ -38,22 +33,20 @@ functions
 
 distributed numpy arrays
 ~~~~~~~~~~~~~~~~~~~~~~~~
-
 | ``scatter(a, axis=2)`` Distribute a single numpy array along axis 2, returning a DistArray.
 | 
 | Arithmetic operations can freely mix ordinary arrays with the new array types.
 | Normal numpy ufuncs can also be used on the distributed arrays.
 | Arithmetic and ufunc computations will automatically be routed to an engine, or executed in parallel on several engines, depending on where the data is. (needs numpy>=1.11.0)
-| 
+
 | ``concatenate``, ``vstack``, ``hstack``, ``dstack``, ``expand_dims``, ``transpose``, ``rollaxis``, ``split``, ``vsplit``, ``hsplit``, ``dsplit``, ``broadcast_arrays``:
 | These work like the numpy functions of the same name. But these can be used with a mix of ordinary ndarrays, RemoteArrays and DistArrays, performing array structural changes while keeping the actual data distributed across multiple engines.
 | For example, stacking several RemoteArrays gives a DistArray, without needing to move data.
-| 
+
 | The distributed arrays so far support basic indexing, slices and advanced integer indexing.
 
 classes
 -------
-
 | ``RemoteArray`` proxy object representing a remote numpy ndarray
 | ``DistArray`` a single ndarray distributed across multiple engines
 | 
@@ -65,7 +58,6 @@ classes
 
 attributes
 ----------
-
 ``engine``: the ``ObjectEngine`` instance on each host (``ObjectHub`` on
 the client)
 
@@ -83,7 +75,6 @@ TODO
 
 Thanks
 ------
-
 Incorporates ``pylru.py`` by Jay Hutchinson,
 http://github.com/jlhutch/pylru
 
