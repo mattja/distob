@@ -1264,7 +1264,9 @@ def __print_ufunc(ufunc, method, i, inputs, **kwargs):
 def _rough_size(obj):
     if hasattr(obj, 'nbytes') and hasattr(type(obj), '__array_interface__'):
         return obj.nbytes
-    elif isinstance(obj, Sequence) and len(obj) > 0:
+    elif (isinstance(obj, Sequence) and
+          not isinstance(obj, string_types) and
+          len(obj) > 0):
         # don't need accuracy, so for speed assume items roughly of equal size
         return _rough_size(obj[0]) * len(obj)
     else:
