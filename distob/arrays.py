@@ -583,6 +583,8 @@ class DistArray(object):
         N = self.shape[self._distaxis]
         ss = []
         ms = []
+        if n == 0:
+            return ss, ms
         j = 0 # the position in ixlist currently being processed
         ix = ixlist[j]
         if ix >= N or ix < -N:
@@ -631,6 +633,8 @@ class DistArray(object):
         ss = []
         ms = []
         js = []
+        if n == 0:
+            return ss, ms, js
         j = 0 # the position in ixlist currently being processed
         ix = ixlist[j]
         if ix >= N or ix < -N:
@@ -762,26 +766,20 @@ class DistArray(object):
         if basic_slicing:
             # separate the index acting on distributed axis from other indices
             distix = index[distaxis]
-            ixlist = self._placeholders[distix]
-            if isinstance(ixlist, numbers.Number):
+            if isinstance(distix, numbers.Number):
                 # distributed axis has been sliced away: return a RemoteArray
                 s, i = self._tosub(ixlist)
                 subix = index[0:distaxis] + (i,) + index[(distaxis+1):]
                 return self._subarrays[s][subix]
-            result_ras = []
-            ss, ms = self._tosubs(ixlist)
-            for s, m in zip(ss, ms):
-                m = slice(m[0], m[-1] + 1)
-                subix = index[0:distaxis] + (m,) + index[(distaxis+1):]
-                result_ras.append(self._subarrays[s][subix])
-            if len(result_ras) is 1:
-                # no longer distributed: return a RemoteArray
-                return result_ras[0]
             else:
+                result_ras = []
+                ss, ms = self._tosubslices(distix)
+                for s, m in zip(ss, ms):
+                    subix = index[0:distaxis] + (m,) + index[(distaxis+1):]
+                    result_ras.append(self._subarrays[s][subix])
                 axes_removed = sum(1 for x in index[:distaxis] if isinstance(
                         x, numbers.Integral))
                 new_distaxis = distaxis - axes_removed
-                return DistArray(result_ras, new_distaxis)
         else:
             # advanced integer slicing
             is_fancy = tuple(not isinstance(x, _SliceType) for x in index)
@@ -866,9 +864,9 @@ class DistArray(object):
                                     subix[i] = subix[i][sl]
                         subix = tuple(subix)
                         result_ras.append(self._subarrays[s][subix])
-                    if all_same_engine and len(result_ras) > 1:
-                        rs = [expand_dims(r, new_distaxis) for r in result_ras]
-                        return concatenate(rs, new_distaxis) # one RemoteArray
+                    if all_same_engine:
+                        result_ras = [expand_dims(r, new_distaxis) for
+                                      r in result_ras]
                 else:
                     # Have more than one nonconstant indexing axis in the
                     # indexing array that applies to our distributed axis.
@@ -876,15 +874,21 @@ class DistArray(object):
                             'data between engines. Will fetch data locally.')
                     warnings.warn(msg, RuntimeWarning)
                     return self._ob[index]
-            if len(result_ras) is 1:
-                # no longer distributed: return a RemoteArray
-                return result_ras[0]
-            engine0 = result_ras[0]._id.engine
-            if all(ra._id.engine == engine0 for ra in result_ras):
-                # no longer distributed: return a RemoteArray
-                return concatenate(result_ras, axis=new_distaxis)
-            else:
-                return DistArray(result_ras, new_distaxis)
+        if len(result_ras) == 0:
+            # result is an array with 0 in its shape
+            subix = index[0:distaxis] + (slice(0),) + index[(distaxis+1):]
+            return self._subarrays[0][subix]
+        if all(not isinstance(ra, RemoteArray) or ra._id.engine == -1 for
+                ra in result_ras):
+            # all resulting subarrays are local: return an ordinary ndarray
+            return gather(concatenate(result_ras, axis=new_distaxis))
+        engines = [ra._id.engine if isinstance(ra, RemoteArray) else -1 for
+                   ra in result_ras]
+        if all(e == engines[0] for e in engines):
+            # no longer distributed: return a RemoteArray
+            return concatenate(result_ras, axis=new_distaxis)
+        else:
+            return DistArray(result_ras, new_distaxis)
 
     def __setitem__(self, index, value):
         """Assign to the sliced item"""
@@ -1596,7 +1600,11 @@ def concatenate(tup, axis=0):
     eid = rarrays[0]._id.engine
     if all(ra._id.engine == eid for ra in rarrays):
         # Arrays to be joined are all on the same engine
-        return call(concatenate, rarrays, axis)
+        if eid == engine.eid:
+            # Arrays are all local
+            return concatenate([gather(r) for r in rarrays], axis)
+        else:
+            return call(concatenate, rarrays, axis)
     else:
         # Arrays to be joined are on different engines.
         # TODO: consolidate any consecutive arrays already on same engine
