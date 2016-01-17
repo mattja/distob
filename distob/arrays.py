@@ -771,7 +771,7 @@ class DistArray(object):
             distix = index[distaxis]
             if isinstance(distix, numbers.Number):
                 # distributed axis has been sliced away: return a RemoteArray
-                s, i = self._tosub(ixlist)
+                s, i = self._tosub(distix)
                 subix = index[0:distaxis] + (i,) + index[(distaxis+1):]
                 return self._subarrays[s][subix]
             else:
