@@ -474,6 +474,9 @@ class DistArray(object):
 
     def __repr__(self):
         classname = self.__class__.__name__
+        if 0 in self.shape:
+            return u'<%s of shape %s with axis %d distributed>' % (
+                    classname, self.shape, self._distaxis)
         selectors = []
         for i in range(self.ndim):
             if self.shape[i] > 3:
