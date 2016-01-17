@@ -362,7 +362,7 @@ def setup_engines(client=None):
         distob.engine = ObjectHub(-1, client)
 
 
-def _process_args(args, kwargs, prefer_local=True):
+def _process_args(args, kwargs, prefer_local=True, recurse=True):
     """Select local or remote execution and prepare arguments accordingly.
     Assumes any remote args have already been moved to a common engine.
 
@@ -373,6 +373,7 @@ def _process_args(args, kwargs, prefer_local=True):
 
     For remote execution, replaces any remote arg with its Id.
     For local execution, replaces any remote arg with its locally cached object
+    Any arguments or kwargs that are Sequences will be recursed one level deep.
 
     Args:
       args (list)
@@ -410,6 +411,16 @@ def _process_args(args, kwargs, prefer_local=True):
                         execloc = id.engine
                         local_args.append(None)
                         remote_args.append(id)
+        elif (isinstance(a, collections.Sequence) and
+                not isinstance(a, string_types) and recurse):
+            eid, ls, _ = _process_args(a, {}, prefer_local, recurse=False)
+            if eid is not this_engine:
+                if execloc is not this_engine and eid is not execloc:
+                    raise DistobValueError(
+                            'two remote arguments are from different engines')
+                execloc = eid
+            local_args.append(ls)
+            remote_args.append(ls)
         else:
             # argument is an ordinary object
             local_args.append(a)
@@ -442,6 +453,16 @@ def _process_args(args, kwargs, prefer_local=True):
                         execloc = id.engine
                         local_kwargs[k] = None
                         remote_kwargs[k] = id
+        elif (isinstance(a, collections.Sequence) and
+                not isinstance(a, string_types) and recurse):
+            eid, ls, _ = _process_args(a, {}, prefer_local, recurse=False)
+            if eid is not this_engine:
+                if execloc is not this_engine and eid is not execloc:
+                    raise DistobValueError(
+                            'two remote arguments are from different engines')
+                execloc = eid
+            local_kwargs[k] = ls
+            remote_kwargs[k] = ls
         else:
             # argument is an ordinary object 
             local_kwargs[k] = a
@@ -454,12 +475,34 @@ def _process_args(args, kwargs, prefer_local=True):
 
 def _remote_call(f, *args, **kwargs):
     """(Executed on remote engine) convert Ids to real objects, call f """
-    args = [distob.engine[a] if isinstance(a, Id) else a for a in args]
+    nargs = []
+    for a in args:
+        if isinstance(a, Id):
+            nargs.append(distob.engine[a])
+        elif (isinstance(a, collections.Sequence) and
+                not isinstance(a, string_types)):
+            nargs.append(
+                    [distob.engine[b] if isinstance(b, Id) else b for b in a])
+        else: nargs.append(a)
     for k, a in kwargs.items():
         if isinstance(a, Id):
             kwargs[k] = distob.engine[a]
-    result = f(*args, **kwargs)
-    if type(result) in distob.engine.proxy_types:
+        elif (isinstance(a, collections.Sequence) and
+                not isinstance(a, string_types)):
+            kwargs[k] = [
+                    distob.engine[b] if isinstance(b, Id) else b for b in a]
+    result = f(*nargs, **kwargs)
+    if (isinstance(result, collections.Sequence) and
+            not isinstance(result, string_types)):
+        # We will return any sub-sequences by value, not recurse deeper
+        results = []
+        for subresult in result:
+            if type(subresult) in distob.engine.proxy_types: 
+                results.append(Ref(subresult))
+            else:
+                results.append(subresult)
+        return results
+    elif type(result) in distob.engine.proxy_types:
         return Ref(result)
     else:
         return result
@@ -541,11 +584,23 @@ def convert_result(r):
 def _remote_methodcall(id, method_name, *args, **kwargs):
     """(Executed on remote engine) convert Ids to real objects, call method """
     obj = distob.engine[id]
-    args = [distob.engine[a] if isinstance(a, Id) else a for a in args]
-    for k, v in kwargs.items():
-        if isinstance(v, Id):
-            kwargs[k] = distob.engine[v]
-    result = getattr(obj, method_name)(*args, **kwargs)
+    nargs = []
+    for a in args:
+        if isinstance(a, Id):
+            nargs.append(distob.engine[a])
+        elif (isinstance(a, collections.Sequence) and
+                not isinstance(a, string_types)):
+            nargs.append(
+                    [distob.engine[b] if isinstance(b, Id) else b for b in a])
+        else: nargs.append(a)
+    for k, a in kwargs.items():
+        if isinstance(a, Id):
+            kwargs[k] = distob.engine[a]
+        elif (isinstance(a, collections.Sequence) and
+                not isinstance(a, string_types)):
+            kwargs[k] = [
+                    distob.engine[b] if isinstance(b, Id) else b for b in a]
+    result = getattr(obj, method_name)(*nargs, **kwargs)
     if (isinstance(result, collections.Sequence) and
             not isinstance(result, string_types)):
         # We will return any sub-sequences by value, not recurse deeper
