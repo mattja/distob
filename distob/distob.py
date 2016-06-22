@@ -639,7 +639,12 @@ def methodcall(obj, method_name, *args, **kwargs):
     """
     this_engine = distob.engine.eid
     args = [obj] + list(args)
-    prefer_local = kwargs.pop('prefer_local', True)
+    prefer_local = kwargs.pop('prefer_local', None)
+    if prefer_local is None:
+        if isinstance(obj, Remote):
+            prefer_local = obj.prefer_local
+        else:
+            prefer_local = True
     block = kwargs.pop('block', True)
     execloc, args, kwargs = _process_args(args, kwargs, prefer_local)
     if execloc is this_engine:
@@ -681,8 +686,7 @@ def _make_proxy_method(method_name, doc=None):
 
 def _make_proxy_property(attrib_name, doc=None):
     def getter(self):
-        return methodcall(self, '__getattribute__', attrib_name,
-                          prefer_local=self.prefer_local)
+        return methodcall(self, '__getattribute__', attrib_name)
     # TODO: implement fset and fdel (requires writeback cache and locking)
     prop = property(fget=getter, doc=doc)
     return prop
