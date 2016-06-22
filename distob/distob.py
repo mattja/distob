@@ -681,7 +681,8 @@ def _make_proxy_method(method_name, doc=None):
 
 def _make_proxy_property(attrib_name, doc=None):
     def getter(self):
-        return methodcall(self, '__getattribute__', attrib_name)
+        return methodcall(self, '__getattribute__', attrib_name,
+                          prefer_local=self.prefer_local)
     # TODO: implement fset and fdel (requires writeback cache and locking)
     prop = property(fget=getter, doc=doc)
     return prop
