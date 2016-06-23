@@ -3,7 +3,7 @@
    (First start an IPython cluster, e.g. by typing 'ipcluster start')
 """
 import distob
-from IPython.parallel import AsyncResult
+from ipyparallel import AsyncResult
 
 # make some arbitrary python objects:
 class A(object):

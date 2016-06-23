@@ -19,12 +19,12 @@ Classes:
   Remote   base class, used when creating Remote* proxy classes
   @proxy_methods(base)   class decorator for creating Remote* proxy classes
   ObjectHub  dict interface giving refs to all distributed objects cluster-wide
-  ObjectEngine  dict holding the distributed objects of a single IPython engine
+  ObjectEngine  dict holding distributed objects of a single ipyparallel engine
   Ref  reference to a (possibly remote) object
 """
 
 from __future__ import absolute_import
-from IPython import parallel
+import ipyparallel
 import distob
 from . import _pylru
 import types
@@ -67,14 +67,14 @@ Id = collections.namedtuple('Id', 'instance engine')
 class Ref(object):
     """Reference to a (possibly remote) object.
 
-    a Ref can exist on the same IPython engine that holds the object, or on 
-    any python instance that has an ObjectHub (such as the IPython client)
+    a Ref can exist on the same ipyparallel engine that holds the object, or on
+    any python instance that has an ObjectHub (such as the ipyparallel client)
 
     Attributes:
       id (Id): An cluster-wide unique identifier for the object.
         id.instance is a number unique within a particular engine.
-        id.engine is the IPython engine number where the object is held, or a
-        negative number if it is held on an IPython client.
+        id.engine is the ipyparallel engine number where the object is held,
+          or a negative number if it is held on an ipyparallel client.
       type: type of the remote object
       metadata (tuple, optional): brief extra information about the object 
         may be defined by specific Remote* classes, to help set up access.
@@ -118,19 +118,19 @@ class Ref(object):
 
 
 class ObjectEngine(dict):
-    """A dict holding the distributed objects of a single IPython engine.
+    """A dict holding the distributed objects of a single ipyparallel engine.
 
     It maintains cluster-wide reference counts of the objects it holds.
-    There is one global instance (distob.engine) on each IPython engine.
+    There is one global instance (distob.engine) on each ipyparallel engine.
 
     For each dict entry,
     Key is an object Id (unique cluster-wide)
     Value is the actual object that is to be accessed remotely.
 
     Attributes:
-      eid (int): IPython engine id number of this engine. A negative number 
-        means this is an IPython client, rather than an engine.
-      nengines (int): Total number of IPython engines (at startup time)
+      eid (int): ipyparallel engine id number of this engine. A negative number
+        means this is an ipyparallel client, rather than an engine.
+      nengines (int): Total number of ipyparallel engines (at startup time)
       refcounts (dict): Key is an object Id (for an object held on this engine)
         Value is the cluster-wide count of how many Ref instances exist 
         pointing to that object.
@@ -205,8 +205,8 @@ class ObjectHub(ObjectEngine):
     Operations supported are get and delete.
 
     Attributes:
-      eid (int): IPython engine id number of this engine. A negative number 
-        means this is an IPython client, rather than an engine.
+      eid (int): ipyparallel engine id number of this engine. A negative number
+        means this is an ipyparallel client, rather than an engine.
       refcounts (dict): Key is an Id (for an object held on this engine). 
         Value is the cluster-wide count of how many Ref instances exist
         pointing to that object.
@@ -220,9 +220,9 @@ class ObjectHub(ObjectEngine):
     def __init__(self, engine_id, client):
         """Make an ObjectHub.
         Args:
-          engine_id: IPython engine id number where this Hub is located, or a
-            negative number if it is on an IPython client.
-          client: IPython.parallel.client
+          engine_id: ipyparallel engine id number where this Hub is located,
+            or a negative number if it is on an ipyparallel client.
+          client: ipyparallel.Client
         """
         self._client = client
         self._dv = client.direct_view(targets='all')
@@ -319,7 +319,7 @@ def _remote_setup_engine(engine_id, nengines):
     # TODO these imports should be unnecessary with improved deserialization
     import numpy as np
     from scipy import stats
-    # TODO Using @parallel.interactive still did not import to __main__
+    # TODO Using @ipyparallel.interactive still did not import to __main__
     #      so will do it this way for now.
     import __main__
     __main__.__dict__['np'] = np
@@ -330,19 +330,21 @@ def setup_engines(client=None):
     """Prepare all iPython engines for distributed object processing.
 
     Args:
-      client (IPython.parallel.client, optional): If None, will create a client         using the default IPython profile.
+      client (ipyparallel.Client, optional): If None, will create a client
+        using the default ipyparallel profile.
     """
     if not client:
         try:
-            client = parallel.Client()
+            client = ipyparallel.Client()
         except:
             raise DistobClusterError(
-                u"""Could not connect to an IPython parallel cluster. Make
+                u"""Could not connect to an ipyparallel cluster. Make
                  sure a cluster is started (e.g. to use the CPUs of a
                  single computer, can type 'ipcluster start')""")
     eids = client.ids
     if not eids:
-        raise DistobClusterError(u'No IPython compute engines are available')
+        raise DistobClusterError(
+                u'No ipyparallel compute engines are available')
     nengines = len(eids)
     dv = client[eids]
     dv.use_dill()
@@ -564,8 +566,8 @@ def call(f, *args, **kwargs):
 def convert_result(r):
     """Waits for and converts any AsyncResults. Converts any Ref into a Remote.
     Args:
-      r: can be an ordinary object, parallel.AsyncResult, a Ref, or a Sequence
-         of objects, AsyncResults and Refs.
+      r: can be an ordinary object, ipyparallel.AsyncResult, a Ref, or a
+        Sequence of objects, AsyncResults and Refs.
     Returns: 
       either an ordinary object or a Remote instance"""
     if (isinstance(r, collections.Sequence) and
@@ -574,7 +576,7 @@ def convert_result(r):
         for subresult in r:
             rs.append(convert_result(subresult))
         return rs
-    if isinstance(r, parallel.AsyncResult):
+    if isinstance(r, ipyparallel.AsyncResult):
         r = r.r
     if isinstance(r, Ref):
         RemoteClass = distob.engine.proxy_types[r.type]
@@ -999,7 +1001,7 @@ def _ars_to_proxies(ars):
         for i in range(len(ars)):
             res.append(_ars_to_proxies(ars[i]))
         return res
-    elif isinstance(ars, parallel.AsyncResult):
+    elif isinstance(ars, ipyparallel.AsyncResult):
         ref = ars.r
         ObClass = ref.type
         if ObClass in distob.engine.proxy_types:

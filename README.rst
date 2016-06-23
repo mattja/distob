@@ -20,7 +20,7 @@ A numpy array can also be scattered across the cluster, along a particular axis.
 
 Note: numpy 1.11.0 or later (not yet released!) is required for full functionality with distributed array arithmetic and ufuncs. You can get a development snapshot of numpy here: https://github.com/numpy/numpy/archive/master.zip
 
-Distob is an object layer built on top of IPython.parallel, so it will
+Distob is an object layer built on top of ``ipyparallel``, so it will
 make use of your default IPython parallel profile. This allows different
 cluster architectures, local CPUs, SSH nodes, PBS, Amazon EC2, etc.
 
@@ -78,8 +78,8 @@ Thanks
 Incorporates ``pylru.py`` by Jay Hutchinson,
 http://github.com/jlhutch/pylru
 
-``IPython`` parallel computing, see:
-http://ipython.org/ipython-doc/dev/parallel/
+``ipyparallel`` interactive parallel computing:
+https://ipyparallel.readthedocs.org/
 
 ``dill`` by Mike McKerns for object serialization, see:
 http://trac.mystic.cacr.caltech.edu/project/pathos
