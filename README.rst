@@ -63,9 +63,9 @@ the client)
 
 TODO
 ----
--  Allow assignment to slices of remote arrays
+-  Allow assignment to slices of remote arrays.
 
--  Implement caching of remote array slice operations
+-  Properly implement caching of remote method results.
 
 -  Auto-creation of proxy classes at runtime (depends uqfoundation/dill#58)
 
