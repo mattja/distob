@@ -537,7 +537,8 @@ def call(f, *args, **kwargs):
     if execloc is this_engine:
         r = f(*args, **kwargs)
     else:
-        if prefer_local:
+        if False and prefer_local:
+            # result cache disabled until issue mattja/distob#1 is fixed
             try:
                 kwtuple = tuple((k, kwargs[k]) for k in sorted(kwargs.keys()))
                 key = (f, args, kwtuple)
@@ -650,7 +651,8 @@ def methodcall(obj, method_name, *args, **kwargs):
     if execloc is this_engine:
         r = getattr(args[0], method_name)(*args[1:], **kwargs)
     else:
-        if prefer_local:
+        if False and prefer_local:
+            # result cache disabled until issue mattja/distob#1 is fixed
             try:
                 kwtuple = tuple((k, kwargs[k]) for k in sorted(kwargs.keys()))
                 key = (args[0], method_name, args, kwtuple)
