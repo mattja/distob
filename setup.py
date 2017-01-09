@@ -39,7 +39,7 @@ setup(
     url='http://github.com/mattja/distob/',
     license='GPLv3+',
     author='Matthew J. Aburn',
-    install_requires=['ipyparallel>=4.0',
+    install_requires=['ipyparallel>=4.0,<5.0',
                       'pyzmq>=2.1.11',
                       'dill>=0.2.1'],
     tests_require=['tox'],
