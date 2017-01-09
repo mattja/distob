@@ -59,6 +59,5 @@ setup(
         'Topic :: Software Development :: Libraries :: Python Modules',
         'Topic :: System :: Distributed Computing',
         ],
-    extras_require={'remote_arrays': ['numpy>=1.6'],
-                    'distributed_ufunc': ['numpy>=1.11']}
+    extras_require={'remote_arrays': ['numpy>=1.6']}
 )

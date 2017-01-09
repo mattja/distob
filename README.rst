@@ -18,7 +18,7 @@ In particular, sending numpy arrays to the cluster is supported.
 
 A numpy array can also be scattered across the cluster, along a particular axis. Operations on the array can then be automatically done in parallel (either using ufuncs, or by using ``vectorize()`` below)
 
-Note: numpy 1.11.0 or later (not yet released!) is required for full functionality with distributed array arithmetic and ufuncs. You can get a development snapshot of numpy here: https://github.com/numpy/numpy/archive/master.zip
+Note: numpy with ``__numpy_ufunc__`` feature enabled (not yet released) is required to support distributed array arithmetic and distributed ufuncs. You can get numpy with this experimental feature enabled here: https://github.com/mattja/numpy/archive/master.zip
 
 Distob is an object layer built on top of ``ipyparallel``, so it will
 make use of your default IPython parallel profile. This allows different
@@ -37,7 +37,7 @@ distributed numpy arrays
 | 
 | Arithmetic operations can freely mix ordinary arrays with the new array types.
 | Normal numpy ufuncs can also be used on the distributed arrays.
-| Arithmetic and ufunc computations will automatically be routed to an engine, or executed in parallel on several engines, depending on where the data is. (needs numpy>=1.11.0)
+| Arithmetic and ufunc computations will automatically be routed to an engine, or executed in parallel on several engines, depending on where the data is. (requires numpy with the ``__numpy_ufunc__`` feature enabled)
 
 | ``concatenate``, ``vstack``, ``hstack``, ``dstack``, ``expand_dims``, ``transpose``, ``rollaxis``, ``split``, ``vsplit``, ``hsplit``, ``dsplit``, ``broadcast_arrays``:
 | These work like the numpy functions of the same name. But these can be used with a mix of ordinary ndarrays, RemoteArrays and DistArrays, performing array structural changes while keeping the actual data distributed across multiple engines.
