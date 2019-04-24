@@ -35,7 +35,7 @@ print(results)
 
 # call methods remotely (with computation in parallel):
 results = [a.f(30, block=False) for a in objects]
-results = [r.result if isinstance(r, AsyncResult) else r for r in results]
+results = [r.result() if isinstance(r, AsyncResult) else r for r in results]
 print(results)
 
 # another way to write that (computation in parallel):
